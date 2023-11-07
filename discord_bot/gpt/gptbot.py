@@ -3,7 +3,7 @@ import os
 import tomllib
 import traceback
 from logging import config, getLogger
-from typing import List
+from typing import List, Union
 
 import discord
 import openai
@@ -18,8 +18,6 @@ basename = os.path.basename(__file__).split(".")[0]
 with open(configpath, "rb") as f:
     log_conf = tomllib.load(f).get("logging")
     log_conf["handlers"]["fileHandler"]["filename"] = os.path.join(log_folder_abspath, f"{basename}.log")
-
-print(log_conf)
 
 logger = getLogger(__name__)
 config.dictConfig(log_conf)
@@ -108,81 +106,34 @@ def split_string(text: str) -> List[str]:
     return ret_list_clean
 
 
+async def reply_openai_exception(retries: int, message: Union[discord.Message, discord.Interaction], e: Exception):
+    """Handles exceptions that occur during OpenAI API calls and sends appropriate replies.
+
+    Args:
+        retries (int): The number of remaining retries.
+        message (discord.Message or discord.Interaction): The message or interaction object representing the user's request.
+        e (Exception): The exception that occurred during the API call.
+
+    Returns:
+        None: The function does not return any value.
+
+    Raises:
+        None: The function does not raise any exceptions.
+    """
+    if retries > 0:
+        await message.reply(
+            f"OpenAI APIでエラーが発生しました。リトライします（残回数{retries}）。\n{traceback.format_exception_only(e)}",
+            mention_author=False,
+        )
+    else:
+        await message.reply(f"OpenAI APIでエラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False)
+
+
 @client.event
 async def on_ready():
     """on ready"""
     print(f"We have logged in as {client.user}")
     await tree.sync()
-
-
-@tree.command(name="gpt", description="chat gptを呼び出す")
-async def gpt(interaction: discord.Interaction, prompt: str):
-    """call ChatGPT bot.
-
-    Args:
-        interaction (discord.Interaction): interaciton.
-        prompt (str): message to be passed on to ChatGPT.
-    """
-    logger.info("command: gpt")
-    global chat_log
-    global model_engine
-    global total_token
-    # msg = await message.reply("生成中...", mention_author=False)
-    await interaction.response.defer()
-    if not prompt:
-        await interaction.followup.send("質問内容がありません")
-        return
-    chat_log.append({"role": "user", "content": prompt})
-    logger.info("user: " + prompt)
-    retries = 3
-    while retries > 0:
-        try:
-            completion = openai.ChatCompletion.create(
-                model=model_engine,
-                messages=chat_log,
-            )
-            response = "> " + prompt + "\n\n"
-            response += completion["choices"][0]["message"]["content"]
-            chat_log.append(completion["choices"][0]["message"].to_dict())
-            logger.info("assistant: " + completion["choices"][0]["message"].to_dict()["content"])
-            if model_engine == "gpt-3.5-turbo":
-                price = round_to_digits(
-                    completion["usage"]["prompt_tokens"] * 0.0015 / 1000
-                    + completion["usage"]["completion_tokens"] * 0.002 / 1000,
-                    3,
-                )
-            elif model_engine == "gpt-4":
-                price = round_to_digits(
-                    completion["usage"]["prompt_tokens"] * 0.03 / 1000
-                    + completion["usage"]["completion_tokens"] * 0.06 / 1000,
-                    3,
-                )
-                response = response + f"\n(USAGE: {price} USD)"
-            total_token += completion["usage"]["total_tokens"]
-            if total_token > 4096:
-                chat_log = chat_log[:1] + chat_log[2:]
-            await interaction.followup.send(response)
-            break
-        except openai.error.InvalidRequestError as e:
-            retries -= 1
-            if retries > 1:
-                logger.exception(e)
-                await interaction.followup.send(
-                    f"OpenAI APIでエラーが発生しました。リトライします（残回数{retries}）。\n{traceback.format_exception_only(e)}"
-                )
-                if "Please reduce the length of the messages." in traceback.format_exception_only(e):
-                    chat_log = chat_log[:1] + chat_log[2:]
-            else:
-                logger.exception(e)
-                await interaction.followup.send(f"OpenAI APIでエラーが発生しました。\n{traceback.format_exception_only(e)}")
-        except discord.errors.HTTPException as e:
-            logger.exception(e)
-            await interaction.followup.send(f"Discord APIでエラーが発生しました。\n{traceback.format_exception_only(e)}")
-            break
-        except Exception as e:
-            logger.exception(e)
-            await interaction.followup.send(f"エラーが発生しました。\n{traceback.format_exception_only(e)}")
-            break
 
 
 @tree.command(name="gpt-hflush", description="chat gptのチャット履歴を消去する")
@@ -277,10 +228,7 @@ async def on_message(message):
         retries = 3
         while retries > 0:
             try:
-                completion = openai.ChatCompletion.create(
-                    model=model_engine,
-                    messages=chat_log,
-                )
+                completion = openai.ChatCompletion.create(model=model_engine, messages=chat_log, request_timeout=120)
                 response = completion["choices"][0]["message"]["content"]
                 response_list = split_string(response)
                 chat_log.append(completion["choices"][0]["message"].to_dict())
@@ -300,28 +248,21 @@ async def on_message(message):
                     response_list.append(f"(USAGE: {price} USD)")
                 logger.info(f"Usage: {price} USD")
                 total_token += completion["usage"]["total_tokens"]
-                if total_token > 4096:
+                if total_token > 4096 - 256:
                     chat_log = chat_log[:1] + chat_log[2:]
                 await msg.delete()
-                logger.info(response_list)
                 for response in response_list:
                     await message.reply(response, mention_author=False)
                 break
+            except openai.error.Timeout as e:
+                retries -= 1
+                logger.exception(e)
+                await reply_openai_exception(retries, message, e)
             except openai.error.InvalidRequestError as e:
                 retries -= 1
-                if retries > 0:
-                    logger.exception(e)
-                    await message.reply(
-                        f"OpenAI APIでエラーが発生しました。リトライします（残回数{retries}）。\n{traceback.format_exception_only(e)}",
-                        mention_author=False,
-                    )
-                    if "Please reduce the length of the messages." in traceback.format_exception_only(e):
-                        chat_log = chat_log[:1] + chat_log[2:]
-                else:
-                    logger.exception(e)
-                    await message.reply(
-                        f"OpenAI APIでエラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False
-                    )
+                logger.exception(e)
+                await reply_openai_exception(retries, message, e)
+                chat_log = chat_log[:1] + chat_log[2:]
             except discord.errors.HTTPException as e:
                 logger.exception(e)
                 await message.reply(
