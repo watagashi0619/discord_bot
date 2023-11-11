@@ -239,15 +239,15 @@ async def on_raw_reaction_add(payload):
     if str(payload.channel_id) in registered_channel_ids:
         title = message.content.split("\n")[0].split(": ")[1]
         authors = message.content.split("\n")[2].split(": ")[1]
-        match = re.search(r"\[(.*?)\]\((.*?)\)", title)  # パターンにマッチする部分を検索
+        match = re.search(r"\[(.*?)\]\((.*?)\)", title)
         title_text = match.group(1)
         link = match.group(2)
 
-        msg = f"{payload.emoji} {message.jump_url} {title}"
+        content = f"{payload.emoji} {message.jump_url} {title}"
         channel = client.get_channel(payload.channel_id)
-        # メンションを指定のチャンネルに投稿
-        await channel.send(msg)
-        logger.info(f"reaction detected! {msg}")
+
+        await channel.send(content)
+        logger.info(f"reaction detected! {content}")
 
         if NOTION_TOKEN is not None:
             post_to_notion_database(title_text, authors, link)
@@ -347,11 +347,16 @@ async def update_cron_schedule(interaction: discord.Interaction, cron_scheduled_
             row = que.first()
             row.scheduled_time = cron_scheduled_time
             db.session.commit()
-            content = f"cron設定を変更しました: {cron_scheduled_time}"
             logger.info(f"Cron setting changed to {cron_scheduled_time}.")
+            row = db.session.query(Feed).filter(Feed.discord_channel_id == channel_id).first()
+            channel = client.get_channel(int(channel_id))
+            topic = f"{row.title} {row.link} (update schedule: {row.scheduled_time})"
+            await channel.edit(topic=topic)
+            logger.info(f'Channel topic changed to "{topic}".')
+            content = f"cron設定とチャンネルトピックを変更しました: {cron_scheduled_time}"
         else:
-            content = "このチャンネルに対応する登録RSSフィードは存在しませんでした。"
             logger.info("There were no registered RSS feeds corresponding to this channel.")
+            content = "このチャンネルに対応する登録RSSフィードは存在しませんでした。"
         await interaction.response.send_message(content=content)
     else:
         response = "Configuration change failed: cron_scheduled_time is not valid."
