@@ -74,7 +74,7 @@ def youtube_video_details(video_ids: list[str]) -> list:
             .list(
                 id=",".join(video_ids[i : min(i + 50, len(video_ids))]),
                 part="liveStreamingDetails",
-                maxResults=5,
+                maxResults=50,
             )
             .execute()
             .get("items", [])
