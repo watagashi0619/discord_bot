@@ -1,7 +1,7 @@
 import enum
 
 from db import Base, engine
-from sqlalchemy import Column, Enum, Integer, String
+from sqlalchemy import Column, DateTime, Enum, Integer, String
 
 
 class IsOnAir(enum.Enum):
@@ -22,6 +22,7 @@ class State(Base):
     video_id = Column(String, primary_key=True)
     title = Column(String)
     is_onair = Column(Enum(IsOnAir))
+    start_time = Column(DateTime(timezone=True))
     message_id = Column(Integer)
 
 
