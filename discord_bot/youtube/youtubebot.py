@@ -46,6 +46,7 @@ tree = app_commands.CommandTree(client)
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN_YOUTUBE")
 CHANNEL_ID = os.getenv("CHANNEL_ID_YOUTUBE")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+UPDATE_SCHEDULE = os.getenv("YOUTUBE_UPDATE_SCHEDULE")
 youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
 
 # はじめて実行された時はdbを作成する
@@ -308,9 +309,11 @@ async def youtube_register(interaction: discord.Interaction, channel_id: str):
 
 
 # 毎時15分に確認
-@tasks.loop(seconds=60 * 15)
+@tasks.loop(seconds=60)
 async def loop():
     """Loop to check the status of registered channels."""
+    if not croniter.match(UPDATE_SCHEDULE, datetime.datetime.now()):
+        return
     # feedから引っ張ってくる
     logger.info("start loop.")
     logger.info("fetch database rows.")
