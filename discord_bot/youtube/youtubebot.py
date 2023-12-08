@@ -92,23 +92,19 @@ def desc_from_isonair(ser: pd.core.series.Series) -> str:
     Returns:
         str: A description of the broadcast times.
     """
-    one_day_ago = datetime.datetime.now() - datetime.timedelta(days=1)
     if ser["isonair"] == IsOnAir.BEFOREONAIR:
-        if ser["start_time"] is not None and ser["start_time"] < one_day_ago:
-            return "~~Scheduled start time: {}~~ canceled".format(ser["start_time"].strftime("%Y/%m/%d %H:%M"))
-        else:
-            return "Scheduled start time: {}".format(ser["start_time"].strftime("%Y/%m/%d %H:%M"))
+        return "Scheduled start time: {}".format(ser["start_time"].strftime("%Y/%m/%d %H:%M"))
     elif ser["isonair"] == IsOnAir.NOWONAIR:
-        if ser["start_time"] is not None and ser["start_time"] < one_day_ago:
-            return "Start time: {}\nEnd time: -- (maybe unarchived)".format(
-                ser["start_time"].strftime("%Y/%m/%d %H:%M")
-            )
-        else:
-            return "Start time: {}".format(ser["start_time"].strftime("%Y/%m/%d %H:%M"))
+        return "Start time: {}".format(ser["start_time"].strftime("%Y/%m/%d %H:%M"))
     elif ser["isonair"] == IsOnAir.AFTERONAIR:
         return "Start time: {}\nEnd time: {}".format(
-            ser["start_time"].strftime("%Y/%m/%d %H:%M"), ser["end_time"].strftime("%Y/%m/%d %H:%M")
+            ser["start_time"].strftime("%Y/%m/%d %H:%M"),
+            ser["end_time"].strftime("%Y/%m/%d %H:%M"),
         )
+    elif ser["isonair"] == IsOnAir.DELETED:
+        return "~~Scheduled start time: {}~~ canceled".format(ser["start_time"].strftime("%Y/%m/%d %H:%M"))
+    elif ser["isonair"] == IsOnAir.UNARCHIVED:
+        return "Start time: {}\nEnd time: -- (maybe unarchived)".format(ser["start_time"].strftime("%Y/%m/%d %H:%M"))
     else:
         return
 
@@ -337,33 +333,69 @@ async def loop():
     db.session.commit()
     logger.info("deleted {} old rows in the database.".format(deleted_row_count))
     # feedにない、かつ、NOWONAIRかBEFOREONAIRはunarciveか消されたもの 終わったことにする 空なこともある
-    que = db.session.query(State).filter(
-        ~State.video_id.in_(df.index.tolist()),
-        or_(State.is_onair == IsOnAir.BEFOREONAIR, State.is_onair == IsOnAir.NOWONAIR),
-    )
+
+    # que = db.session.query(State).filter(
+    #     ~State.video_id.in_(df.index.tolist()),
+    #     or_(State.is_onair == IsOnAir.BEFOREONAIR, State.is_onair == IsOnAir.NOWONAIR),
+    # )
+    # states = que.all()
+    # data = [
+    #     [
+    #         state.video_id,
+    #         state.title,
+    #         f"https://www.youtube.com/watch?v={state.video_id}",
+    #         IsOnAir.DELETED if state.is_onair == IsOnAir.BEFOREONAIR else IsOnAir.UNARCHIVED,
+    #         state.start_time,
+    #         None,
+    #         0x0099E1,
+    #     ]
+    #     for state in states
+    # ]
+
+    # feedにない、かつ、NOWONAIRかBEFOREONAIRはunarciveか消されたもの
+    # 一旦データベースでDELETEDとUNARCHIVEDに設定する
+    que = db.session.query(State).filter(~State.video_id.in_(df.index.tolist()), State.is_onair == IsOnAir.BEFOREONAIR)
     states = que.all()
-    que.delete(synchronize_session=False)
-    db.session.commit()
+    for state in states:
+        state.is_onair = IsOnAir.DELETED
+        logger.info("commit {} BEFOREONAIR -> DELETED".format(state.title))
+        db.session.add(state)
+        db.session.commit()
+
+    que = db.session.query(State).filter(~State.video_id.in_(df.index.tolist()), State.is_onair == IsOnAir.NOWONAIR)
+    states = que.all()
+    for state in states:
+        state.is_onair = IsOnAir.UNARCHIVED
+        logger.info("commit {} NOWONAIR -> UNARCHIVED".format(state.title))
+        db.session.add(state)
+        db.session.commit()
+
+    # que.delete(synchronize_session=False)
+    # db.session.commit()
+    # df_deleted = pd.DataFrame(
+    #     data=data,
+    #     columns=[
+    #         "video_id",
+    #         "title",
+    #         "link",
+    #         "isonair",
+    #         "start_time",
+    #         "end_time",
+    #         "colour",
+    #     ],
+    # ).set_index("video_id")
+    # データベースの中の動画と放送終了のものを除いたdataframeを作成
+    states = (
+        db.session.query(State).filter(State.is_onair != IsOnAir.NOTLIVE, State.is_onair != IsOnAir.AFTERONAIR).all()
+    )
     data = [
         [
             state.video_id,
             state.title,
             f"https://www.youtube.com/watch?v={state.video_id}",
-            IsOnAir.AFTERONAIR,
-            state.start_time,
-            None,
-            0x0099E1,
         ]
         for state in states
     ]
-    df_deleted = pd.DataFrame(
-        data=data, columns=["video_id", "title", "link", "isonair", "start_time", "end_time", "colour"]
-    ).set_index("video_id")
-    # データベースの中の動画と放送終了のものを除いたdataframeを作成
-    states = (
-        db.session.query(State).filter(State.is_onair != IsOnAir.NOTLIVE, State.is_onair != IsOnAir.AFTERONAIR).all()
-    )
-    data = [[state.video_id, state.title, f"https://www.youtube.com/watch?v={state.video_id}"] for state in states]
     df_fromdb = pd.DataFrame(data=data, columns=columns[:-1]).set_index("video_id")
     # feedからデータベースとかぶってるが、タイトルが違うものを置き換える（実際には全部書き換えているが）
     df_fromdb.title.loc[df_fromdb.index.isin(df.index)] = df.title.loc[df.index.isin(df_fromdb.index)]
@@ -387,10 +419,12 @@ async def loop():
             df.loc[detail["id"], "end_time"],
             df.loc[detail["id"], "colour"],
         ) = check_detail(detail)
-    # 削除予定のものと組み合わせる
-    if not df_deleted.empty:
-        logger.debug("df_deleted is noe empty!")
-        df = pd.concat([df, df_deleted], axis=0)
+    # # 削除予定のものと組み合わせる
+    # if not df_deleted.empty:
+    #     logger.info("df_deleted is not empty!")
+    #     df = pd.concat([df, df_deleted], axis=0)
+    # pd.NaTはデータベースには格納できません
+    df.replace(None, inplace=True)
 
     discord_channel = client.get_channel(int(CHANNEL_ID))
     for video_id, row in df.iterrows():
@@ -428,14 +462,20 @@ async def loop():
 
                 logger_message = f"edit {state.message_id}, {title}:\n"
 
-                one_day_ago = datetime.datetime.now() - datetime.timedelta(days=1)
-
-                if row["start_time"] is not None and row["start_time"] < one_day_ago:
-                    # 予定消失もしくは削除された生放送なら
-                    embed.colour = discord.Colour(int(colour))
+                if state.is_onair == IsOnAir.DELETED or state.is_onair == IsOnAir.UNARCHIVED:
+                    if state.is_onair == IsOnAir.DELETED:
+                        # 予定消失した生放送なら
+                        logger_message += f"- deleted: {embed.description} >> {description}"
+                    elif state.is_onair == IsOnAir.UNARCHIVED:
+                        # 削除された生放送なら
+                        logger_message += f"- unarchived: {embed.description} >> {description}"
+                    embed.colour = discord.Colour(int(0x0099E1))
                     embed.description = description
-                    state.is_onair = is_onair
-                    logger_message += f"- deleted: {embed.description} >> {description}"
+                    await message.edit(embed=embed)
+                    logger.info(logger_message)
+                    que.delete(synchronize_session=False)
+                    db.session.commit()
+                    continue
                 elif state.title != row["title"]:
                     # タイトルが変わっていたら
                     logger_message += f"- title changed: {embed.title} >> {title}"

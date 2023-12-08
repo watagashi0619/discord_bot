@@ -9,6 +9,8 @@ class IsOnAir(enum.Enum):
     NOWONAIR = enum.auto()
     AFTERONAIR = enum.auto()
     NOTLIVE = enum.auto()
+    DELETED = enum.auto()
+    UNARCHIVED = enum.auto()
 
 
 class Channel(Base):
