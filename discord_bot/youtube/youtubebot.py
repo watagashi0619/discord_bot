@@ -328,47 +328,75 @@ async def loop():
         ~State.video_id.in_(df.index.tolist()),
         or_(State.is_onair == IsOnAir.AFTERONAIR, State.is_onair == IsOnAir.NOTLIVE),
     )
+    states = que.all()
+    for state in states:
+        logger.info("deleted in the database: {} ".format(state.title))
     deleted_row_count = que.count()
     que.delete(synchronize_session=False)
     db.session.commit()
     logger.info("deleted {} old rows in the database.".format(deleted_row_count))
-    # feedにない、かつ、NOWONAIRかBEFOREONAIRはunarciveか消されたもの 終わったことにする 空なこともある
 
-    # que = db.session.query(State).filter(
-    #     ~State.video_id.in_(df.index.tolist()),
-    #     or_(State.is_onair == IsOnAir.BEFOREONAIR, State.is_onair == IsOnAir.NOWONAIR),
-    # )
-    # states = que.all()
-    # data = [
-    #     [
-    #         state.video_id,
-    #         state.title,
-    #         f"https://www.youtube.com/watch?v={state.video_id}",
-    #         IsOnAir.DELETED if state.is_onair == IsOnAir.BEFOREONAIR else IsOnAir.UNARCHIVED,
-    #         state.start_time,
-    #         None,
-    #         0x0099E1,
-    #     ]
-    #     for state in states
-    # ]
+    # feedにない、かつ、NOWONAIRかBEFOREONAIRは消されたかunarciveか
+    # 終了判定とし、DELETEDとUNARCHIVEDに設定してdataframeを作る
+    # 空なこともある
+    que = db.session.query(State).filter(
+        ~State.video_id.in_(df.index.tolist()),
+        or_(State.is_onair == IsOnAir.BEFOREONAIR, State.is_onair == IsOnAir.NOWONAIR),
+    )
+    states = que.all()
+    data = []
+    for state in states:
+        if state.is_onair == IsOnAir.BEFOREONAIR:
+            state.is_onair = IsOnAir.DELETED
+            logger.info("commit {} BEFOREONAIR -> DELETED".format(state.title))
+        elif state.is_onair == IsOnAir.NOWONAIR:
+            state.is_onair = IsOnAir.UNARCHIVED
+            logger.info("commit {} NOWONAIR -> UNARCHIVED".format(state.title))
+        data.append(
+            [
+                state.video_id,
+                state.title,
+                f"https://www.youtube.com/watch?v={state.video_id}",
+                IsOnAir.DELETED if state.is_onair == IsOnAir.BEFOREONAIR else IsOnAir.UNARCHIVED,
+                state.start_time,
+                None,
+                0x0099E1,
+            ]
+        )
+        db.session.add(state)
+        db.session.commit()
+    df_deleted = pd.DataFrame(
+        data=data,
+        columns=[
+            "video_id",
+            "title",
+            "link",
+            "isonair",
+            "start_time",
+            "end_time",
+            "colour",
+        ],
+    ).set_index("video_id")
 
     # feedにない、かつ、NOWONAIRかBEFOREONAIRはunarciveか消されたもの
     # 一旦データベースでDELETEDとUNARCHIVEDに設定する
-    que = db.session.query(State).filter(~State.video_id.in_(df.index.tolist()), State.is_onair == IsOnAir.BEFOREONAIR)
-    states = que.all()
-    for state in states:
-        state.is_onair = IsOnAir.DELETED
-        logger.info("commit {} BEFOREONAIR -> DELETED".format(state.title))
-        db.session.add(state)
-        db.session.commit()
+    # que = db.session.query(State).filter(~State.video_id.in_(df.index.tolist()), State.is_onair == IsOnAir.BEFOREONAIR)
+    # states = que.all()
+    # for state in states:
+    #     state.is_onair = IsOnAir.DELETED
+    #     logger.info("commit {} BEFOREONAIR -> DELETED".format(state.title))
+    #     db.session.add(state)
+    #     db.session.commit()
 
-    que = db.session.query(State).filter(~State.video_id.in_(df.index.tolist()), State.is_onair == IsOnAir.NOWONAIR)
-    states = que.all()
-    for state in states:
-        state.is_onair = IsOnAir.UNARCHIVED
-        logger.info("commit {} NOWONAIR -> UNARCHIVED".format(state.title))
-        db.session.add(state)
-        db.session.commit()
+    # que = db.session.query(State).filter(~State.video_id.in_(df.index.tolist()), State.is_onair == IsOnAir.NOWONAIR)
+    # states = que.all()
+    # for state in states:
+    #     state.is_onair = IsOnAir.UNARCHIVED
+    #     logger.info("commit {} NOWONAIR -> UNARCHIVED".format(state.title))
+    #     db.session.add(state)
+    #     db.session.commit()
+
+    # ここにDELETEDとUNARCHIVEDのデータベースを作る
 
     # que.delete(synchronize_session=False)
     # db.session.commit()
@@ -384,10 +412,16 @@ async def loop():
     #         "colour",
     #     ],
     # ).set_index("video_id")
-    # データベースの中の動画と放送終了のものを除いたdataframeを作成
+
+    # データベースの中の放送前と放送中のdataframeを作成
     states = (
-        db.session.query(State).filter(State.is_onair != IsOnAir.NOTLIVE, State.is_onair != IsOnAir.AFTERONAIR).all()
+        db.session.query(State)
+        .filter(or_(State.is_onair == IsOnAir.BEFOREONAIR, State.is_onair == IsOnAir.NOWONAIR))
+        .all()
     )
+    # states = (
+    #     db.session.query(State).filter(State.is_onair != IsOnAir.NOTLIVE, State.is_onair != IsOnAir.AFTERONAIR).all()
+    # )
     data = [
         [
             state.video_id,
@@ -419,10 +453,11 @@ async def loop():
             df.loc[detail["id"], "end_time"],
             df.loc[detail["id"], "colour"],
         ) = check_detail(detail)
+
     # # 削除予定のものと組み合わせる
-    # if not df_deleted.empty:
-    #     logger.info("df_deleted is not empty!")
-    #     df = pd.concat([df, df_deleted], axis=0)
+    if not df_deleted.empty:
+        logger.info("df_deleted is not empty!")
+        df = pd.concat([df, df_deleted], axis=0)
     # pd.NaTはデータベースには格納できません
     df.replace(None, inplace=True)
 
