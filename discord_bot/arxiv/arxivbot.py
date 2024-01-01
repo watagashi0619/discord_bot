@@ -38,6 +38,7 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN_ARXIV")
 GAE_TRANSLATE_URL = os.getenv("GAE_TRANSLATE_URL")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+CHANNEL_ID_ARXIVEXPORT = os.getenv("CHANNEL_ID_ARXIVEXPORT")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -245,6 +246,8 @@ async def on_raw_reaction_add(payload):
 
         content = f"{payload.emoji} {message.jump_url} {title}"
         channel = client.get_channel(payload.channel_id)
+        if CHANNEL_ID_ARXIVEXPORT is not None:
+            channel = client.get_channel(int(CHANNEL_ID_ARXIVEXPORT))
 
         await channel.send(content)
         logger.info(f"reaction detected! {content}")

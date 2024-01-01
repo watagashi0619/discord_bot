@@ -62,6 +62,7 @@ Notionと連携で、リアクションを押した場合にNotionのデータ�
     - `CHANNEL_ID_YOUTUBE`: YouTube botが投稿するチャンネルのID
     - (optional) `NOTION_TOKEN`: Notionのトークン（arXiv botでリアクションしたらNotionに転送したい時用）
     - (optional) `NOTION_DATABASE_ID`: Notionのデータベースのid（arXiv botでリアクションしたらNotionに転送したい時用）
+    - (optional) `CHANNEL_ID_ARXIVEXPORT`: arXiv botでリアクションをした投稿を転送するチャンネルのID（デフォルトは同じチャンネル）
 - logの設定
     - `pyproject.toml` にログの設定
         - `logs` フォルダに各ファイルの実行履歴が流れる
@@ -83,7 +84,6 @@ Notionと連携で、リアクションを押した場合にNotionのデータ�
 │   │   ├── arxivbot.py
 │   │   ├── db.py
 │   │   └── models.py
-│   ├── arxivpost.py
 │   ├── gpt
 │   │   └── gptbot.py
 │   ├── __init__.py
