@@ -98,7 +98,7 @@ async def updated(feed: feedparser.FeedParserDict, channel: discord.abc.GuildCha
     one_day_ago = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=+9), "JST")) - datetime.timedelta(
         days=1
     )
-    feed_updated_time = dateutil.parser.parse(feed.updated)
+    feed_updated_time = dateutil.parser.parse(feed.feed.updated)
     if one_day_ago < feed_updated_time:
         # 更新あり
         channel_name = channel.name
@@ -131,10 +131,10 @@ async def feed_post(channel_id: str, rss_url: str):
     if is_updated:
         for entry in feed.entries:
             title = re.search(r"^([^\(]+)", entry.title).group(1).strip()
-            doi = re.search(r"\(([^\)]+)\)$", entry.title).group(1).strip()
-            href = entry.id
-            abstract = re.sub("<.*?>", "", entry.summary.replace("\n", " "))
-            authors = ",".join([re.sub("<.*?>", "", author.name) for author in entry.authors])
+            doi = re.search(r"arXiv:(\d+\.\d+v\d+)", entry.summary).group(1)
+            href = entry.link
+            abstract = re.search(r"Abstract: (.+?)$", entry.summary, re.DOTALL).group(1)
+            authors = entry.author
 
             translated_text = translated_en_to_jp(abstract)
             content = (
@@ -245,8 +245,10 @@ async def on_raw_reaction_add(payload):
         link = match.group(2)
 
         content = f"{payload.emoji} {message.jump_url} {title}"
-        channel = client.get_channel(payload.channel_id)
-        if CHANNEL_ID_ARXIVEXPORT is not None:
+
+        if CHANNEL_ID_ARXIVEXPORT is None:
+            channel = client.get_channel(payload.channel_id)
+        else:
             channel = client.get_channel(int(CHANNEL_ID_ARXIVEXPORT))
 
         await channel.send(content)
