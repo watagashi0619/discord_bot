@@ -96,10 +96,10 @@ def split_string(text: str) -> List[str]:
         if "```" in line:
             code_block_flag = not code_block_flag
         if len(buffer + line + "\n") <= 2000 or (len(buffer + line + "\n") > 2000 and code_block_flag):
-            buffer += line + "\n"
-            if code_block_flag and len(buffer) > 2000:
-                ret_list.append(buffer)
+            if code_block_flag and len(buffer + line + "```\n") > 2000:
+                ret_list.append(buffer + "```\n")
                 buffer = "```\n"
+            buffer += line + "\n"
         else:
             ret_list.append(buffer)
             buffer = line + "\n"
@@ -130,7 +130,9 @@ async def reply_openai_exception(retries: int, message: Union[discord.Message, d
             mention_author=False,
         )
     else:
-        await message.reply(f"OpenAI APIでエラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False)
+        await message.reply(
+            f"OpenAI APIでエラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False
+        )
 
 
 @client.event
@@ -309,7 +311,9 @@ async def on_message(message):
                 break
             except Exception as e:
                 logger.exception(e)
-                await message.reply(f"エラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False)
+                await message.reply(
+                    f"エラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False
+                )
                 break
 
 
