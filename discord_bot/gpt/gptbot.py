@@ -402,10 +402,7 @@ async def on_message(message):
                         base64_image = base64.b64encode(image_file.read()).decode("utf-8")
                     content = [
                         {"type": "text", "text": f"{prompt}"},
-                        {
-                            "type": "image_url",
-                            "image_url": f"data:image/jpeg;base64,{base64_image}",
-                        },
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
                     ]
         chat_log.append({"role": "user", "content": content})
         logger.info(f"user: {content}")
