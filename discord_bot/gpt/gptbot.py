@@ -37,7 +37,7 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN_GPT")
 openai.api_key = os.getenv("OPENAI_API_KEY")
 BOT_NAME = "chat-gpt"
 CHANNEL_ID = os.getenv("CHANNEL_ID_GPT")
-model_engine = "gpt-3.5-turbo"
+model_engine = "gpt-4-turbo"
 # model_engines = ["gpt-3.5-turbo","gpt-4-turbo"]
 chat_log = []
 system_set = [
@@ -433,7 +433,9 @@ async def on_message(message):
                     response_list.append(f"(USAGE: {price} USD)")
                 logger.info(f"Usage: {price} USD")
                 total_token += completion["usage"]["total_tokens"]
-                if total_token > 4096 - 256:
+                if model_engine == "gpt-3.5-turbo" and total_token > 16000 - 256:
+                    chat_log = chat_log[1:]
+                elif model_engine == "gpt-4-turbo" and total_token > 128000 - 256:
                     chat_log = chat_log[1:]
                 logger.info(chat_log)
                 # logger.debug(completion)
