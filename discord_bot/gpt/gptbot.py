@@ -13,12 +13,15 @@ import discord
 import openai
 from discord import app_commands
 from dotenv import load_dotenv
+from openai import OpenAI
 from pdfminer.high_level import extract_text
 
 current_folder_abspath = os.path.dirname(os.path.abspath(__file__))
 grandparent_folder_abspath = os.path.dirname(os.path.dirname(current_folder_abspath))
 log_folder_abspath = os.path.join(grandparent_folder_abspath, "logs")
 configpath = os.path.join(grandparent_folder_abspath, "pyproject.toml")
+paper_folder_abspath = os.path.join(grandparent_folder_abspath, "papers")
+paper_chat_logs_json_abspath = os.path.join(paper_folder_abspath, "paper_chat_logs.json")
 basename = os.path.basename(__file__).split(".")[0]
 with open(configpath, "rb") as f:
     log_conf = tomllib.load(f).get("logging")
@@ -34,7 +37,7 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN_GPT")
-openai.api_key = os.getenv("OPENAI_API_KEY")
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 BOT_NAME = "chat-gpt"
 CHANNEL_ID = os.getenv("CHANNEL_ID_GPT")
 model_engine = "gpt-4-turbo"
@@ -154,7 +157,9 @@ async def gpt_delete(interaction: discord.Interaction):
     """
     logger.info("command: gpt-hflush")
     global chat_log
+    global total_token
     chat_log = []
+    total_token = 0
     logger.info("Deleted chat logs.")
     response = "チャット履歴を削除しました。"
     await interaction.response.send_message(response)
@@ -212,6 +217,10 @@ def clean_extracted_text(text):
 
 
 paper_chat_logs = {}
+# load paper_chat_logs
+if os.path.exists(paper_chat_logs_json_abspath):
+    with open(paper_chat_logs_json_abspath, "r") as f:
+        paper_chat_logs = json.load(f)
 
 
 @tree.command(name="gpt-paper-interpreter", description="論文の要約を行います。建てられたスレッド内で対話も可能です。")
@@ -228,8 +237,8 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     await interaction.response.defer()
 
     logger.info("command: gpt-interpreter")
-    mydir = "/home/raspberrypi4/discord_bot/pdfs"
-    file_path = f"{mydir}/{pdf_file.filename}"
+    # mydir = "/home/raspberrypi4/discord_bot/pdfs"
+    file_path = f"{paper_folder_abspath}/{pdf_file.filename}"
     await pdf_file.save(file_path)
 
     logger.info("saved " + file_path)
@@ -240,39 +249,42 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     # extractor = PaperMetaInfo()
     # title, abstract = extractor.get_title_and_abstract(file_path)
 
-    completion = openai.ChatCompletion.create(
+    completion = openai_client.chat.completions.create(
         model="gpt-4-turbo",  # "gpt-3.5-turbo-0125"
         messages=[
             {
                 "role": "user",
-                "content": "The opening sentence of the paper is given as following text. From the given text, extract the title, authors' names and abstract correctly. In particular, extract the abstract correctly without making a single mistake and without making any arrangements.\n\n###\n\n"
+                "content": "The opening sentence of the paper is given as following text. From the given text, extract the title, authors' names and abstract correctly. In particular, extract the abstract correctly without making a single mistake and without making any arrangements. Also, translate the extracted abstract into Japanese.\n\n###\n\n"
                 + clean_text[:16000],
             }
         ],
         functions=[
             {
                 "name": "get_metadata",
-                "description": "extract the title, authors' names and abstract correctly",
+                "description": "extract the title, authors' names and abstract correctly. Also, translate the extracted abstract into Japanese.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "title": {"type": "string", "description": "title"},
                         "authors": {"type": "string", "description": "authors"},
                         "abstract": {"type": "string", "description": "abstract"},
+                        "abstract_ja": {"type": "string", "description": "abstract translated into Japanese"},
                     },
-                    "required": ["title", "authors", "abstract"],
+                    "required": ["title", "authors", "abstract", "abstract_ja"],
                 },
             }
         ],
         function_call="auto",
     )
-    response = json.loads(completion["choices"][0]["message"]["function_call"]["arguments"])
+    response = json.loads(completion.choices[0].message.function_call.arguments)
     title = response["title"]
     authors = response["authors"]
     abstract = response["abstract"]
+    abstract_ja = response["abstract_ja"]
     logger.info("assistant: Title: " + title)
     logger.info("assistant: Authors: " + authors)
     logger.info("assistant: Abstract: " + abstract)
+    logger.info("assistant: Abstract (Japanese): " + abstract_ja)
 
     # price = round_to_digits(
     #     completion["usage"]["prompt_tokens"] * 0.50 / 1000000
@@ -280,8 +292,7 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     #     3,
     # )
     price = round_to_digits(
-        completion["usage"]["prompt_tokens"] * 10.00 / 1000000
-        + completion["usage"]["completion_tokens"] * 30.00 / 1000000,
+        completion.usage.prompt_tokens * 10.00 / 1000000 + completion.usage.completion_tokens * 30.00 / 1000000,
         3,
     )
     logger.info(f"Usage: {price} USD")
@@ -294,17 +305,23 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     response_list = [
         f"**Authors**: {authors}",
         f"**Abstract**: {abstract}",
+        f"**あらまし**: {abstract_ja}",
         f"(USAGE: {price} USD)",
     ]
     for response in response_list:
         await thread.send(response)
 
-    content = f"""
-    Summarise the study's objectives, methodology, results and conclusions in Japanese using the following bullet points. However, parts that may be technical terms should also be written in English.
+    content = f"""日本語で答えてください。
+    ユーザーから与えられた論文の内容について、60秒で読めるように、以下のすべての問いに一問一答で答えてください。ただし、専門用語だと思われるものを日本語に翻訳した場合は、翻訳前の原文もあわせて記してください。
     \n----------------------\n
     {clean_text}
     \n----------------------\n
-    研究目的、方法、結果、結論（と、あれば、今後のありうる研究の方向性）の要約:
+    【目的】この論文の目的は何？
+    【問題意識】先行研究ではどのような点が課題だったか？
+    【手法】この研究の手法は何？独自性は？
+    【結果】どのように有効性を定量、定性的に評価したか？
+    【限界】この論文における限界は？
+    【次の研究の方向性】次に読むべき論文は？（論文番号があれば、それもあわせて）
     """
 
     messages = [
@@ -320,25 +337,24 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     retries = 3
     while retries > 0:
         try:
-            completion = openai.ChatCompletion.create(
-                model="gpt-4-turbo", messages=messages, request_timeout=300, max_tokens=2000
+            completion = openai_client.chat.completions.create(
+                model="gpt-4-turbo", messages=messages, timeout=300, max_tokens=4096
             )
-            response = completion["choices"][0]["message"]["content"]
-            logger.info("assistant: " + completion["choices"][0]["message"].to_dict()["content"])
+            response = completion.choices[0].message.content
+            logger.info("assistant: " + completion.choices[0].message.content)
             response_list = split_string(response)
             price = round_to_digits(
-                completion["usage"]["prompt_tokens"] * 10.00 / 1000000
-                + completion["usage"]["completion_tokens"] * 30.00 / 1000000,
+                completion.usage.prompt_tokens * 10.00 / 1000000 + completion.usage.completion_tokens * 30.00 / 1000000,
                 3,
             )
             logger.info(f"Usage: {price} USD")
             response_list.append(f"(USAGE: {price} USD)")
-            messages.append(completion["choices"][0]["message"].to_dict())
+            messages.append(completion.choices[0].message.to_dict())
             await message.delete()
             for response in response_list:
                 await thread.send(response)
             break
-        except openai.error.Timeout as e:
+        except openai.APITimeoutError as e:
             retries -= 1
             logger.exception(e)
             # await thread.reply(
@@ -347,7 +363,10 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
             await reply_openai_exception(retries, thread, e)
 
     global paper_chat_logs
-    paper_chat_logs[thread.id] = messages
+    paper_chat_logs[str(thread.id)] = messages
+    # export paper_chat_logs
+    with open(paper_chat_logs_json_abspath, "w") as f:
+        json.dump(paper_chat_logs, f, ensure_ascii=False)
 
 
 @client.event
@@ -376,18 +395,20 @@ async def on_message(message):
     if (
         message.channel.type == discord.ChannelType.public_thread
         and message.channel.owner_id == client.user.id
-        and message.channel.id in paper_chat_logs.keys()
+        and str(message.channel.id) in paper_chat_logs.keys()
     ):
         await on_paper_thread(message)
     if str(message.channel.id) == CHANNEL_ID:
         msg = await message.reply("生成中...", mention_author=False)
         # async with message.channel.typing():
         prompt = message.content
-        if not prompt:
+        if not prompt and not message.attachments:
             await msg.delete()
             await message.channel.send("質問内容がありません")
             return
-        content = prompt
+        content = []
+        if prompt:
+            content.append({"type": "text", "text": f"{prompt}"})
         if len(message.attachments) > 0:
             for attachment in message.attachments:
                 if attachment.content_type.startswith("image"):
@@ -400,10 +421,25 @@ async def on_message(message):
                     # base64
                     with open(img_path, "rb") as image_file:
                         base64_image = base64.b64encode(image_file.read()).decode("utf-8")
-                    content = [
-                        {"type": "text", "text": f"{prompt}"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
-                    ]
+                    content.append(
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    )
+                if "text/plain" in attachment.content_type:
+                    # テキストのダウンロード
+                    text_data = await attachment.read()
+                    text = text_data.decode("utf-8")
+                    logger.info(text)
+                    content.append({"type": "text", "text": f"{text}"})
+                if attachment.content_type == "application/pdf":
+                    # PDFのダウンロード
+                    pdf_data = await attachment.read()
+                    # 一時ファイルとして保存
+                    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                        temp_file.write(pdf_data)
+                    pdf_path = temp_file.name
+                    # テキスト抽出
+                    text = extract_text_from_pdf(pdf_path)
+                    content.append({"type": "text", "text": f"{text}"})
         chat_log.append({"role": "user", "content": content})
         logger.info(f"user: {content}")
         retries = 3
@@ -411,28 +447,28 @@ async def on_message(message):
             try:
                 input_chat_log = chat_log
                 input_chat_log = system_set + chat_log
-                completion = openai.ChatCompletion.create(
-                    model=model_engine, messages=input_chat_log, request_timeout=120, max_tokens=2000
+                completion = openai_client.chat.completions.create(
+                    model=model_engine, messages=input_chat_log, timeout=120, max_tokens=4096
                 )
-                response = completion["choices"][0]["message"]["content"]
+                response = completion.choices[0].message.content
                 response_list = split_string(response)
-                chat_log.append(completion["choices"][0]["message"].to_dict())
-                logger.info("assistant: " + completion["choices"][0]["message"].to_dict()["content"])
+                chat_log.append(completion.choices[0].message.to_dict())
+                logger.info("assistant: " + completion.choices[0].message.content)
                 if model_engine == "gpt-3.5-turbo":
                     price = round_to_digits(
-                        completion["usage"]["prompt_tokens"] * 0.50 / 1000000
-                        + completion["usage"]["completion_tokens"] * 1.50 / 1000000,
+                        completion.usage.prompt_tokens * 0.50 / 1000000
+                        + completion.usage.completion_tokens * 1.50 / 1000000,
                         3,
                     )
                 elif model_engine == "gpt-4-turbo":
                     price = round_to_digits(
-                        completion["usage"]["prompt_tokens"] * 10.00 / 1000000
-                        + completion["usage"]["completion_tokens"] * 30.00 / 1000000,
+                        completion.usage.prompt_tokens * 10.00 / 1000000
+                        + completion.usage.completion_tokens * 30.00 / 1000000,
                         3,
                     )
                     response_list.append(f"(USAGE: {price} USD)")
                 logger.info(f"Usage: {price} USD")
-                total_token += completion["usage"]["total_tokens"]
+                total_token += completion.usage.total_tokens
                 if model_engine == "gpt-3.5-turbo" and total_token > 16000 - 256:
                     chat_log = chat_log[1:]
                 elif model_engine == "gpt-4-turbo" and total_token > 128000 - 256:
@@ -443,11 +479,11 @@ async def on_message(message):
                 for response in response_list:
                     await message.reply(response, mention_author=False)
                 break
-            except openai.error.Timeout as e:
+            except openai.APITimeoutError as e:
                 retries -= 1
                 logger.exception(e)
                 await reply_openai_exception(retries, message, e)
-            except openai.error.InvalidRequestError as e:
+            except openai.BadRequestError as e:
                 retries -= 1
                 logger.exception(e)
                 await reply_openai_exception(retries, message, e)
@@ -478,24 +514,25 @@ async def on_paper_thread(message):
     global paper_chat_logs
     msg = await message.reply("生成中...", mention_author=False)
     prompt = message.content
-    paper_chat_logs[message.channel.id].append({"role": "user", "content": prompt})
+    paper_chat_logs[str(message.channel.id)].append({"role": "user", "content": prompt})
     retries = 3
     while retries > 0:
         try:
-            completion = openai.ChatCompletion.create(
+            completion = openai_client.chat.completions.create(
                 model="gpt-4-turbo",
-                messages=paper_chat_logs[message.channel.id],
-                request_timeout=240,
-                max_tokens=2000,
+                messages=paper_chat_logs[str(message.channel.id)],
+                timeout=240,
+                max_tokens=4096,
             )
-            response = completion["choices"][0]["message"]["content"]
+            response = completion.choices[0].message.content
             response_list = split_string(response)
-            paper_chat_logs[message.channel.id].append(completion["choices"][0]["message"].to_dict())
-            logger.info("assistant: " + completion["choices"][0]["message"].to_dict()["content"])
+            paper_chat_logs[str(message.channel.id)].append(completion.choices[0].message.to_dict())
+            with open(paper_chat_logs_json_abspath, "w") as f:
+                json.dump(paper_chat_logs, f, ensure_ascii=False)
+            logger.info("assistant: " + completion.choices[0].message.content)
             # model_engine == "gpt-4-turbo":
             price = round_to_digits(
-                completion["usage"]["prompt_tokens"] * 0.01 / 1000
-                + completion["usage"]["completion_tokens"] * 0.03 / 1000,
+                completion.usage.prompt_tokens * 0.01 / 1000 + completion.usage.completion_tokens * 0.03 / 1000,
                 3,
             )
             logger.info(f"Usage: {price} USD")
@@ -504,7 +541,8 @@ async def on_paper_thread(message):
             for response in response_list:
                 await message.channel.send(response)
             break
-        except openai.error.Timeout as e:
+        except openai.APITimeoutError as e:
+            logger.info(e)
             retries -= 1
             logger.exception(e)
             # await thread.reply(
