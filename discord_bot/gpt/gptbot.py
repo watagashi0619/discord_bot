@@ -40,8 +40,8 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN_GPT")
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 BOT_NAME = "chat-gpt"
 CHANNEL_ID = os.getenv("CHANNEL_ID_GPT")
-model_engine = "gpt-4-turbo"
-# model_engines = ["gpt-3.5-turbo","gpt-4-turbo"]
+model_engine = "gpt-4o"
+# model_engines = ["gpt-4o-mini","gpt-4o"]
 chat_log = []
 system_set = [
     {
@@ -75,6 +75,54 @@ def round_to_digits(val: float, digits: int) -> float:
         return 0
     else:
         return round(val, -int(math.floor(math.log10(abs(val))) + (1 - digits)))
+
+
+def calculate_price(completion: openai.ChatCompletion, model_engine: str) -> float:
+    """
+    Calculate the price of the OpenAI API usage based on the completion object.
+
+    The price is calculated based on the number of tokens used in the prompt and
+    completion, and the pricing rates for the specified model engine.
+
+    Args:
+        completion (openai.ChatCompletion): The completion object returned by the OpenAI API.
+        model_engine (str): The model engine used for the completion.
+
+    Returns:
+        float: The price of the OpenAI API usage in USD.
+
+    Examples:
+        >>> calculate_price(completion, "gpt-3.5-turbo")
+        0.123
+        >>> calculate_price(completion, "gpt-4o")
+        0.456
+    """
+    if model_engine == "gpt-3.5-turbo":
+        price = round_to_digits(
+            completion.usage.prompt_tokens * 0.50 / 1000000 + completion.usage.completion_tokens * 1.50 / 1000000,
+            3,
+        )
+    elif model_engine == "gpt-4-turbo":
+        price = round_to_digits(
+            completion.usage.prompt_tokens * 10.00 / 1000000 + completion.usage.completion_tokens * 30.00 / 1000000,
+            3,
+        )
+    elif model_engine == "gpt-4o":
+        price = round_to_digits(
+            completion.usage.prompt_tokens * 5.00 / 1000000 + completion.usage.completion_tokens * 15.00 / 1000000,
+            3,
+        )
+    elif model_engine == "gpt-4o-mini":
+        price = round_to_digits(
+            completion.usage.prompt_tokens * 0.15 / 1000000 + completion.usage.completion_tokens * 0.60 / 1000000,
+            3,
+        )
+    elif model_engine == "claude-3-5-sonnet-20240620":
+        price = round_to_digits(
+            completion.usage.input_tokens * 3.00 / 1000000 + completion.usage.output_tokens * 15.00 / 1000000,
+            3,
+        )
+    return price
 
 
 def split_string(text: str) -> List[str]:
@@ -165,19 +213,19 @@ async def gpt_delete(interaction: discord.Interaction):
     await interaction.response.send_message(response)
 
 
-@tree.command(name="gpt-switch", description="chat gptモデルをgpt-3.5-turboとgpt-4-turboの間で切り替える")
+@tree.command(name="gpt-switch", description="chat gptモデルをgpt-4o-miniとgpt-4oの間で切り替える")
 async def gpt_switch(interaction: discord.Interaction):
-    """switching the ChatGPT model between gpt-3.5-turbo and gpt-4-turbo.
+    """switching the ChatGPT model between gpt-4o-mini and gpt-4o.
 
     Args:
         interaction (discord.Interaction): interaction.
     """
     logger.info("command: gpt-switch")
     global model_engine
-    if model_engine == "gpt-3.5-turbo":
-        model_engine = "gpt-4-turbo"
-    elif model_engine == "gpt-4-turbo":
-        model_engine = "gpt-3.5-turbo"
+    if model_engine == "gpt-4o-mini":
+        model_engine = "gpt-4o"
+    elif model_engine == "gpt-4o":
+        model_engine = "gpt-4o-mini"
     response = f"モデルエンジンを {model_engine} に変更しました。"
     logger.info("Change the model engine to " + model_engine)
     await interaction.response.send_message(response)
@@ -250,7 +298,7 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     # title, abstract = extractor.get_title_and_abstract(file_path)
 
     completion = openai_client.chat.completions.create(
-        model="gpt-4-turbo",  # "gpt-3.5-turbo-0125"
+        model="gpt-4o-mini",
         messages=[
             {
                 "role": "user",
@@ -286,15 +334,7 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     logger.info("assistant: Abstract: " + abstract)
     logger.info("assistant: Abstract (Japanese): " + abstract_ja)
 
-    # price = round_to_digits(
-    #     completion["usage"]["prompt_tokens"] * 0.50 / 1000000
-    #     + completion["usage"]["completion_tokens"] * 1.50 / 1000000,
-    #     3,
-    # )
-    price = round_to_digits(
-        completion.usage.prompt_tokens * 10.00 / 1000000 + completion.usage.completion_tokens * 30.00 / 1000000,
-        3,
-    )
+    price = calculate_price(completion, model_engine)
     logger.info(f"Usage: {price} USD")
 
     message = await interaction.followup.send(f"**Title**: {title}")
@@ -338,15 +378,12 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     while retries > 0:
         try:
             completion = openai_client.chat.completions.create(
-                model="gpt-4-turbo", messages=messages, timeout=300, max_tokens=4096
+                model="gpt-4o", messages=messages, timeout=300, max_tokens=4096
             )
             response = completion.choices[0].message.content
-            logger.info("assistant: " + completion.choices[0].message.content)
+            logger.info("assistant: " + response)
             response_list = split_string(response)
-            price = round_to_digits(
-                completion.usage.prompt_tokens * 10.00 / 1000000 + completion.usage.completion_tokens * 30.00 / 1000000,
-                3,
-            )
+            price = calculate_price(completion, model_engine)
             logger.info(f"Usage: {price} USD")
             response_list.append(f"(USAGE: {price} USD)")
             messages.append(completion.choices[0].message.to_dict())
@@ -454,24 +491,15 @@ async def on_message(message):
                 response_list = split_string(response)
                 chat_log.append(completion.choices[0].message.to_dict())
                 logger.info("assistant: " + completion.choices[0].message.content)
-                if model_engine == "gpt-3.5-turbo":
-                    price = round_to_digits(
-                        completion.usage.prompt_tokens * 0.50 / 1000000
-                        + completion.usage.completion_tokens * 1.50 / 1000000,
-                        3,
-                    )
-                elif model_engine == "gpt-4-turbo":
-                    price = round_to_digits(
-                        completion.usage.prompt_tokens * 10.00 / 1000000
-                        + completion.usage.completion_tokens * 30.00 / 1000000,
-                        3,
-                    )
-                    response_list.append(f"(USAGE: {price} USD)")
-                logger.info(f"Usage: {price} USD")
+                price = calculate_price(completion, model_engine)
+                response_list.append(f"(USAGE: {price} USD, responsed by {model_engine})")
+                logger.info(f"Usage: {price} USD, responsed by {model_engine}")
                 total_token += completion.usage.total_tokens
                 if model_engine == "gpt-3.5-turbo" and total_token > 16000 - 256:
                     chat_log = chat_log[1:]
-                elif model_engine == "gpt-4-turbo" and total_token > 128000 - 256:
+                elif model_engine == "gpt-4o" and total_token > 128000 - 256:
+                    chat_log = chat_log[1:]
+                elif model_engine == "gpt-4o-mini" and total_token > 128000 - 256:
                     chat_log = chat_log[1:]
                 logger.info(chat_log)
                 # logger.debug(completion)
@@ -512,6 +540,7 @@ async def on_paper_thread(message):
         None
     """
     global paper_chat_logs
+    global model_engine
     msg = await message.reply("生成中...", mention_author=False)
     prompt = message.content
     paper_chat_logs[str(message.channel.id)].append({"role": "user", "content": prompt})
@@ -519,7 +548,7 @@ async def on_paper_thread(message):
     while retries > 0:
         try:
             completion = openai_client.chat.completions.create(
-                model="gpt-4-turbo",
+                model=model_engine,
                 messages=paper_chat_logs[str(message.channel.id)],
                 timeout=240,
                 max_tokens=4096,
@@ -530,13 +559,9 @@ async def on_paper_thread(message):
             with open(paper_chat_logs_json_abspath, "w") as f:
                 json.dump(paper_chat_logs, f, ensure_ascii=False)
             logger.info("assistant: " + completion.choices[0].message.content)
-            # model_engine == "gpt-4-turbo":
-            price = round_to_digits(
-                completion.usage.prompt_tokens * 0.01 / 1000 + completion.usage.completion_tokens * 0.03 / 1000,
-                3,
-            )
-            logger.info(f"Usage: {price} USD")
-            response_list.append(f"(USAGE: {price} USD)")
+            price = calculate_price(completion, model_engine)
+            logger.info(f"Usage: {price} USD, responsed by {model_engine}")
+            response_list.append(f"(USAGE: {price} USD, responsed by {model_engine})")
             await msg.delete()
             for response in response_list:
                 await message.channel.send(response)
