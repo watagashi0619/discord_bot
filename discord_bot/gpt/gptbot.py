@@ -7,13 +7,13 @@ import tempfile
 import tomllib
 import traceback
 from logging import config, getLogger
-from typing import List, Union
+from typing import Union
 
+import anthropic
 import discord
 import openai
 from discord import app_commands
 from dotenv import load_dotenv
-from openai import OpenAI
 from pdfminer.high_level import extract_text
 
 current_folder_abspath = os.path.dirname(os.path.abspath(__file__))
@@ -37,20 +37,26 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN_GPT")
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-BOT_NAME = "chat-gpt"
+openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+anthoropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 CHANNEL_ID = os.getenv("CHANNEL_ID_GPT")
-model_engine = "gpt-4o"
+model_engine = "gpt-4o-2024-08-06"
 # model_engines = ["gpt-4o-mini","gpt-4o"]
 chat_log = []
-system_set = [
-    {
-        "role": "system",
-        "content": "あなたの名前は「ことのせ つむぐ」で、私をアシストしてくれる優しい女の子です。"
-        + "敬語や丁寧語、「ですます」調を一切使わずにタメ口で返答してください。"
-        + "タメ口とは、敬語や丁寧語を一切使わずに話すこと。文末の動詞や助詞を省略したり、体言止めを使ったりすることがよくあります。親しみやすさを出すために、くだけた表現やスラング、略語などが使われることがあります。",
-    }
-]
+# system_set = [
+#     {
+#         "role": "system",
+#         "content": "あなたの名前は「ことのせ つむぐ」で、私をアシストしてくれる優しい女の子です。"
+#         + "敬語や丁寧語、「ですます」調を一切使わずにタメ口で返答してください。"
+#         + "タメ口とは、敬語や丁寧語を一切使わずに話すこと。文末の動詞や助詞を省略したり、体言止めを使ったりすることがよくあります。親しみやすさを出すために、くだけた表現やスラング、略語などが使われることがあります。",
+#     }
+# ]
+system = (
+    "あなたの名前は「ことのせ つむぐ」で、私をアシストしてくれる優しい女の子です。"
+    + "敬語や丁寧語、「ですます」調を一切使わずにタメ口で返答してください。"
+    + "タメ口とは、敬語や丁寧語を一切使わずに話すこと。文末の動詞や助詞を省略したり、体言止めを使ったりすることがよくあります。親しみやすさを出すために、くだけた表現やスラング、略語などが使われることがあります。"
+)
+system_paper = "You are a researcher. You give thoughtful answers, taking into account the back and forth queries."
 total_token = 0
 
 
@@ -77,15 +83,18 @@ def round_to_digits(val: float, digits: int) -> float:
         return round(val, -int(math.floor(math.log10(abs(val))) + (1 - digits)))
 
 
-def calculate_price(completion: openai.ChatCompletion, model_engine: str) -> float:
+def calculate_price(
+    completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message],
+    model_engine: str,
+) -> float:
     """
-    Calculate the price of the OpenAI API usage based on the completion object.
+    Calculate the price of the OpenAI API or Anthropic API usage based on the completion object.
 
     The price is calculated based on the number of tokens used in the prompt and
     completion, and the pricing rates for the specified model engine.
 
     Args:
-        completion (openai.ChatCompletion): The completion object returned by the OpenAI API.
+        completion (openai.types.chat.chat_completion.ChatCompletion): The completion object returned by the OpenAI API.
         model_engine (str): The model engine used for the completion.
 
     Returns:
@@ -112,6 +121,11 @@ def calculate_price(completion: openai.ChatCompletion, model_engine: str) -> flo
             completion.usage.prompt_tokens * 5.00 / 1000000 + completion.usage.completion_tokens * 15.00 / 1000000,
             3,
         )
+    elif model_engine == "gpt-4o-2024-08-06":
+        price = round_to_digits(
+            completion.usage.prompt_tokens * 2.50 / 1000000 + completion.usage.completion_tokens * 10.00 / 1000000,
+            3,
+        )
     elif model_engine == "gpt-4o-mini":
         price = round_to_digits(
             completion.usage.prompt_tokens * 0.15 / 1000000 + completion.usage.completion_tokens * 0.60 / 1000000,
@@ -125,7 +139,7 @@ def calculate_price(completion: openai.ChatCompletion, model_engine: str) -> flo
     return price
 
 
-def split_string(text: str) -> List[str]:
+def split_string(text: str) -> list[str]:
     """
     Split a long string, possibly containing newlines and code blocks, into a
     list of strings each with maximum length 2000.
@@ -141,7 +155,7 @@ def split_string(text: str) -> List[str]:
         text (str): The string to split.
 
     Returns:
-        List[str]: The list of split strings.
+        list[str]: The list of split strings.
     """
     ret_list = []
     buffer = ""
@@ -162,6 +176,137 @@ def split_string(text: str) -> List[str]:
 
     ret_list_clean = [s for s in ret_list if s != ""]
     return ret_list_clean
+
+
+def get_completion(
+    model_engine: str,
+    messages: list[str],
+    system=None,
+    timeout: int = 120,
+    max_tokens: int = 4096,
+):
+    """Get completion from OpenAI API or Anthropic API.
+
+    Args:
+        model_engine (str): The model engine to use for the completion.
+        messages (list[str]): The list of messages in the conversation.
+        system (str): The system message to set for the completion.
+        timeout (int): The maximum time in seconds to wait for the completion.
+        max_tokens (int): The maximum number of tokens to generate in the completion.
+
+    Returns:
+        openai.types.chat.chat_completion.ChatCompletion or anthropic.types.message.Message: The completion object returned by the API.
+
+    Raises:
+        None: The function does not raise any exceptions.
+    """
+    if "gpt" in model_engine:
+        system_set = [{"role": "system", "content": system}] if system else []
+        return openai_client.chat.completions.create(
+            model=model_engine, messages=system_set + messages, timeout=timeout, max_tokens=max_tokens
+        )
+    elif "claude" in model_engine:
+        return anthoropic_client.messages.create(
+            model=model_engine,
+            messages=messages,
+            system=system,
+            timeout=timeout,
+            max_tokens=max_tokens,
+        )
+
+
+def get_response_text(
+    completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message]
+) -> str:
+    """Get the response text from the completion object.
+
+    Args:
+        completion (openai.types.chat.chat_completion.ChatCompletion or anthropic.types.message.Message): The completion object returned by the API.
+
+    Returns:
+        str: The response text generated by the model.
+
+    Raises:
+        None: The function does not raise any exceptions.
+    """
+    if isinstance(completion, openai.types.chat.chat_completion.ChatCompletion):
+        return completion.choices[0].message.content
+    elif isinstance(completion, anthropic.types.message.Message):
+        return completion.content[0].text
+
+
+def get_message_log(
+    completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message]
+):
+    if isinstance(completion, openai.types.chat.chat_completion.ChatCompletion):
+        return completion.choices[0].message.to_dict()
+    elif isinstance(completion, anthropic.types.message.Message):
+        return {"role": completion.role, "content": completion.content[0].text}
+
+
+def get_total_tokens(
+    completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message]
+) -> int:
+    """Get the total number of tokens used in the completion object.
+
+    Args:
+        completion (openai.types.chat.chat_completion.ChatCompletion or anthropic.types.message.Message): The completion object returned by the API.
+
+    Returns:
+        int: The total number of tokens used in the completion.
+
+    Raises:
+        None: The function does not raise any exceptions.
+    """
+    if isinstance(completion, openai.types.chat.chat_completion.ChatCompletion):
+        return completion.usage.total_tokens
+    elif isinstance(completion, anthropic.types.message.Message):
+        return completion.usage.input_tokens + completion.usage.output_tokens
+
+
+def format_image_data(base64_image: str, model_engine: str) -> dict:
+    """Format the image data for the API response.
+
+    Args:
+        base64_image (str): The base64 encoded image data.
+        model_engine (str): The model engine to use for the conversion.
+
+    Returns:
+        dict: The formatted image data for the API response.
+
+    Raises:
+        None: The function does not raise any exceptions.
+    """
+    is_gpt = "gpt" in model_engine
+
+    if is_gpt:
+        return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+    else:
+        return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64_image}}
+
+
+def convert_messages(messages: list, model_engine: str):
+    """Convert messages to the format required by the API.
+
+    Args:
+        messages (list): The list of messages to convert.
+        model_engine (str): The model engine to use for the conversion.
+    """
+
+    def convert_content(content):
+        if isinstance(content, list):
+            return [convert_item(item) for item in content]
+        return content
+
+    def convert_item(item):
+        if item["type"] == "image":
+            return format_image_data(item["source"]["data"], model_engine)
+        elif item["type"] == "image_url":
+            base64_data = item["image_url"]["url"].split(",")[1]
+            return format_image_data(base64_data, model_engine)
+        return item
+
+    return [{"role": message["role"], "content": convert_content(message["content"])} for message in messages]
 
 
 async def reply_openai_exception(retries: int, message: Union[discord.Message, discord.Interaction], e: Exception):
@@ -222,12 +367,18 @@ async def gpt_switch(interaction: discord.Interaction):
     """
     logger.info("command: gpt-switch")
     global model_engine
+    global chat_log
     if model_engine == "gpt-4o-mini":
+        model_engine = "gpt-4o-2024-08-06"
+    elif model_engine == "gpt-4o-2024-08-06":
         model_engine = "gpt-4o"
     elif model_engine == "gpt-4o":
+        model_engine = "claude-3-5-sonnet-20240620"
+    elif model_engine == "claude-3-5-sonnet-20240620":
         model_engine = "gpt-4o-mini"
     response = f"モデルエンジンを {model_engine} に変更しました。"
     logger.info("Change the model engine to " + model_engine)
+    chat_log = convert_messages(chat_log, model_engine)
     await interaction.response.send_message(response)
 
 
@@ -240,14 +391,8 @@ async def gpt_system(interaction: discord.Interaction, prompt: str):
         prompt (str): the setting of the ChatGPT character you want it to be.
     """
     logger.info("command: gpt-system")
-    global system_set
-    # chat_log.append({"role": "system", "content": prompt})
-    system_set = [
-        {
-            "role": "system",
-            "content": prompt,
-        }
-    ]
+    global system
+    system = prompt
     logger.info("Set gpt character.")
     response = "role: systemを次のように設定しました:\n" + ">>> " + prompt
     await interaction.response.send_message(response)
@@ -334,7 +479,7 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     logger.info("assistant: Abstract: " + abstract)
     logger.info("assistant: Abstract (Japanese): " + abstract_ja)
 
-    price = calculate_price(completion, model_engine)
+    price = calculate_price(completion, "gpt-4o-mini")
     logger.info(f"Usage: {price} USD")
 
     message = await interaction.followup.send(f"**Title**: {title}")
@@ -364,29 +509,22 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     【次の研究の方向性】次に読むべき論文は？（論文番号があれば、それもあわせて）
     """
 
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a researcher. You give thoughtful answers, taking into account the back and forth queries.",
-        },
-        {"role": "user", "content": content},
-    ]
-
+    global system_paper
+    messages = [{"role": "user", "content": content}]
     message = await thread.send("生成中...")
 
     retries = 3
     while retries > 0:
         try:
-            completion = openai_client.chat.completions.create(
-                model="gpt-4o", messages=messages, timeout=300, max_tokens=4096
-            )
-            response = completion.choices[0].message.content
+            model_for_paper = "gpt-4o-2024-08-06"
+            completion = get_completion(model_for_paper, messages, system=system_paper, timeout=300, max_tokens=4096)
+            response = get_response_text(completion)
             logger.info("assistant: " + response)
             response_list = split_string(response)
-            price = calculate_price(completion, model_engine)
+            price = calculate_price(completion, model_for_paper)
             logger.info(f"Usage: {price} USD")
             response_list.append(f"(USAGE: {price} USD)")
-            messages.append(completion.choices[0].message.to_dict())
+            messages.append(get_message_log(completion))
             await message.delete()
             for response in response_list:
                 await thread.send(response)
@@ -394,9 +532,6 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
         except openai.APITimeoutError as e:
             retries -= 1
             logger.exception(e)
-            # await thread.reply(
-            #     f"OpenAI APIでエラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False
-            # )
             await reply_openai_exception(retries, thread, e)
 
     global paper_chat_logs
@@ -458,9 +593,7 @@ async def on_message(message):
                     # base64
                     with open(img_path, "rb") as image_file:
                         base64_image = base64.b64encode(image_file.read()).decode("utf-8")
-                    content.append(
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    )
+                        content.append(format_image_data(base64_image, model_engine))
                 if "text/plain" in attachment.content_type:
                     # テキストのダウンロード
                     text_data = await attachment.read()
@@ -482,24 +615,20 @@ async def on_message(message):
         retries = 3
         while retries > 0:
             try:
-                input_chat_log = chat_log
-                input_chat_log = system_set + chat_log
-                completion = openai_client.chat.completions.create(
-                    model=model_engine, messages=input_chat_log, timeout=120, max_tokens=4096
-                )
-                response = completion.choices[0].message.content
+                completion = get_completion(model_engine, chat_log, system=system, timeout=120, max_tokens=4096)
+                response = get_response_text(completion)
                 response_list = split_string(response)
-                chat_log.append(completion.choices[0].message.to_dict())
-                logger.info("assistant: " + completion.choices[0].message.content)
+                chat_log.append(get_message_log(completion))
+                logger.info("assistant: " + response)
                 price = calculate_price(completion, model_engine)
                 response_list.append(f"(USAGE: {price} USD, responsed by {model_engine})")
                 logger.info(f"Usage: {price} USD, responsed by {model_engine}")
-                total_token += completion.usage.total_tokens
-                if model_engine == "gpt-3.5-turbo" and total_token > 16000 - 256:
-                    chat_log = chat_log[1:]
-                elif model_engine == "gpt-4o" and total_token > 128000 - 256:
+                total_token += get_total_tokens(completion)
+                if model_engine == "gpt-4o" and total_token > 128000 - 256:
                     chat_log = chat_log[1:]
                 elif model_engine == "gpt-4o-mini" and total_token > 128000 - 256:
+                    chat_log = chat_log[1:]
+                elif model_engine == "claude-3-5-sonnet-20240620" and total_token > 200000 - 256:
                     chat_log = chat_log[1:]
                 logger.info(chat_log)
                 # logger.debug(completion)
@@ -541,24 +670,27 @@ async def on_paper_thread(message):
     """
     global paper_chat_logs
     global model_engine
+    global system_paper
+
     msg = await message.reply("生成中...", mention_author=False)
     prompt = message.content
     paper_chat_logs[str(message.channel.id)].append({"role": "user", "content": prompt})
     retries = 3
     while retries > 0:
         try:
-            completion = openai_client.chat.completions.create(
-                model=model_engine,
-                messages=paper_chat_logs[str(message.channel.id)],
+            completion = get_completion(
+                model_engine,
+                paper_chat_logs[str(message.channel.id)],
+                system=system_paper,
                 timeout=240,
                 max_tokens=4096,
             )
-            response = completion.choices[0].message.content
+            response = get_response_text(completion)
             response_list = split_string(response)
-            paper_chat_logs[str(message.channel.id)].append(completion.choices[0].message.to_dict())
+            paper_chat_logs[str(message.channel.id)].append(get_message_log(completion))
             with open(paper_chat_logs_json_abspath, "w") as f:
                 json.dump(paper_chat_logs, f, ensure_ascii=False)
-            logger.info("assistant: " + completion.choices[0].message.content)
+            logger.info("assistant: " + response)
             price = calculate_price(completion, model_engine)
             logger.info(f"Usage: {price} USD, responsed by {model_engine}")
             response_list.append(f"(USAGE: {price} USD, responsed by {model_engine})")
@@ -570,9 +702,6 @@ async def on_paper_thread(message):
             logger.info(e)
             retries -= 1
             logger.exception(e)
-            # await thread.reply(
-            #     f"OpenAI APIでエラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False
-            # )
             await reply_openai_exception(retries, message, e)
 
 
