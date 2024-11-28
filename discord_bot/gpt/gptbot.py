@@ -40,7 +40,7 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN_GPT")
 openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 anthoropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 CHANNEL_ID = os.getenv("CHANNEL_ID_GPT")
-model_engine = "gpt-4o-2024-08-06"
+model_engine = "gpt-4o-2024-11-20"
 # model_engines = ["gpt-4o-mini","gpt-4o"]
 chat_log = []
 # system_set = [
@@ -121,7 +121,7 @@ def calculate_price(
             completion.usage.prompt_tokens * 5.00 / 1000000 + completion.usage.completion_tokens * 15.00 / 1000000,
             3,
         )
-    elif model_engine == "gpt-4o-2024-08-06":
+    elif model_engine == "gpt-4o-2024-11-20":
         price = round_to_digits(
             completion.usage.prompt_tokens * 2.50 / 1000000 + completion.usage.completion_tokens * 10.00 / 1000000,
             3,
@@ -177,6 +177,32 @@ def split_string(text: str) -> list[str]:
     ret_list_clean = [s for s in ret_list if s != ""]
     return ret_list_clean
 
+def split_text_by_period(text: str) -> list[str]:
+    """
+    Split a long string into a list of strings each with maximum length 2000,
+    ensuring that splits occur at the end of sentences (periods).
+
+    Args:
+        text (str): The string to split.
+
+    Returns:
+        list[str]: The list of split strings.
+    """
+    ret_list = []
+    while len(text) > 2000:
+        # Find the last period within the first 2000 characters
+        split_index = text.rfind('.', 0, 2000)
+        if split_index == -1:
+            # If no period is found, split at 2000 characters
+            split_index = 2000
+        else:
+            # Include the period in the split
+            split_index += 1
+        ret_list.append(text[:split_index].strip())
+        text = text[split_index:].strip()
+    if text:
+        ret_list.append(text)
+    return ret_list
 
 def get_completion(
     model_engine: str,
@@ -369,8 +395,8 @@ async def gpt_switch(interaction: discord.Interaction):
     global model_engine
     global chat_log
     if model_engine == "gpt-4o-mini":
-        model_engine = "gpt-4o-2024-08-06"
-    elif model_engine == "gpt-4o-2024-08-06":
+        model_engine = "gpt-4o-2024-11-20"
+    elif model_engine == "gpt-4o-2024-11-20":
         model_engine = "gpt-4o"
     elif model_engine == "gpt-4o":
         model_engine = "claude-3-5-sonnet-20240620"
@@ -469,6 +495,7 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
         ],
         function_call="auto",
     )
+    # logger.info("DEBUG: " + completion.choices[0].message.function_call.arguments)
     response = json.loads(completion.choices[0].message.function_call.arguments)
     title = response["title"]
     authors = response["authors"]
@@ -494,7 +521,13 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
         f"(USAGE: {price} USD)",
     ]
     for response in response_list:
-        await thread.send(response)
+        # もしresponseが長い場合は分割して送信する
+        if len(response) > 2000:
+            split_responses = split_text_by_period(response)
+            for split_response in split_responses:
+                await thread.send(split_response)
+        else:
+            await thread.send(response)
 
     content = f"""日本語で答えてください。
     ユーザーから与えられた論文の内容について、60秒で読めるように、以下のすべての問いに一問一答で答えてください。ただし、専門用語だと思われるものを日本語に翻訳した場合は、翻訳前の原文もあわせて記してください。
@@ -516,7 +549,7 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     retries = 3
     while retries > 0:
         try:
-            model_for_paper = "gpt-4o-2024-08-06"
+            model_for_paper = "gpt-4o-2024-11-20"
             completion = get_completion(model_for_paper, messages, system=system_paper, timeout=300, max_tokens=4096)
             response = get_response_text(completion)
             logger.info("assistant: " + response)
