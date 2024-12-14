@@ -8,10 +8,12 @@ import tomllib
 import traceback
 from logging import config, getLogger
 from typing import Union
+import typing_extensions
 
 import anthropic
 import discord
 import openai
+import google.generativeai as genai
 from discord import app_commands
 from dotenv import load_dotenv
 from pdfminer.high_level import extract_text
@@ -39,18 +41,11 @@ tree = app_commands.CommandTree(client)
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN_GPT")
 openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 anthoropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+gemini_client = genai.GenerativeModel(model_name="gemini-1.5-flash")
 CHANNEL_ID = os.getenv("CHANNEL_ID_GPT")
 model_engine = "gpt-4o-2024-11-20"
-# model_engines = ["gpt-4o-mini","gpt-4o"]
 chat_log = []
-# system_set = [
-#     {
-#         "role": "system",
-#         "content": "あなたの名前は「ことのせ つむぐ」で、私をアシストしてくれる優しい女の子です。"
-#         + "敬語や丁寧語、「ですます」調を一切使わずにタメ口で返答してください。"
-#         + "タメ口とは、敬語や丁寧語を一切使わずに話すこと。文末の動詞や助詞を省略したり、体言止めを使ったりすることがよくあります。親しみやすさを出すために、くだけた表現やスラング、略語などが使われることがあります。",
-#     }
-# ]
 system = (
     "あなたの名前は「ことのせ つむぐ」で、私をアシストしてくれる優しい女の子です。"
     + "敬語や丁寧語、「ですます」調を一切使わずにタメ口で返答してください。"
@@ -136,6 +131,8 @@ def calculate_price(
             completion.usage.input_tokens * 3.00 / 1000000 + completion.usage.output_tokens * 15.00 / 1000000,
             3,
         )
+    elif model_engine == "gemini-1.5-flash":
+        price = 0
     return price
 
 
@@ -259,7 +256,8 @@ def get_response_text(
         return completion.choices[0].message.content
     elif isinstance(completion, anthropic.types.message.Message):
         return completion.content[0].text
-
+    elif isinstance(completion, genai.types.GenerateContentResponse):
+        return completion.text
 
 def get_message_log(
     completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message]
@@ -268,7 +266,8 @@ def get_message_log(
         return completion.choices[0].message.to_dict()
     elif isinstance(completion, anthropic.types.message.Message):
         return {"role": completion.role, "content": completion.content[0].text}
-
+    elif isinstance(completion, genai.types.GenerateContentResponse):
+        return completion.candidates[0]
 
 def get_total_tokens(
     completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message]
@@ -401,6 +400,8 @@ async def gpt_switch(interaction: discord.Interaction):
     elif model_engine == "gpt-4o":
         model_engine = "claude-3-5-sonnet-20240620"
     elif model_engine == "claude-3-5-sonnet-20240620":
+    #     model_engine = "gemini-1.5-flash"
+    # elif model_engine == "gemini-1.5-flash":
         model_engine = "gpt-4o-mini"
     response = f"モデルエンジンを {model_engine} に変更しました。"
     logger.info("Change the model engine to " + model_engine)
@@ -434,6 +435,11 @@ def clean_extracted_text(text):
     text = re.sub(r"\s+", " ", text)
     return text
 
+class PaperMetadata(typing_extensions.TypedDict):
+    title: str
+    authors: str
+    abstract: str
+    abstract_ja: str
 
 paper_chat_logs = {}
 # load paper_chat_logs
@@ -467,36 +473,18 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
 
     # extractor = PaperMetaInfo()
     # title, abstract = extractor.get_title_and_abstract(file_path)
-
-    completion = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "user",
-                "content": "The opening sentence of the paper is given as following text. From the given text, extract the title, authors' names and abstract correctly. In particular, extract the abstract correctly without making a single mistake and without making any arrangements. Also, translate the extracted abstract into Japanese.\n\n###\n\n"
-                + clean_text[:16000],
-            }
-        ],
-        functions=[
-            {
-                "name": "get_metadata",
-                "description": "extract the title, authors' names and abstract correctly. Also, translate the extracted abstract into Japanese.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string", "description": "title"},
-                        "authors": {"type": "string", "description": "authors"},
-                        "abstract": {"type": "string", "description": "abstract"},
-                        "abstract_ja": {"type": "string", "description": "abstract translated into Japanese"},
-                    },
-                    "required": ["title", "authors", "abstract", "abstract_ja"],
-                },
-            }
-        ],
-        function_call="auto",
-    )
+    content = """
+    The opening sentence of the paper is given below. From the given text, correctly extract the title, authors' names and abstract, always following the following notes.
+    - In particular, the abstract should be extracted correctly, without word-for-word errors and without any arrangement.
+    - Remove any * or number before or after the name of the author(s).
+    - To ensure that each author can be distinguished, the authors' names are output separated by ", ".
+    - The name of the author(s) may be followed by the name of the organisation to which the author(s) belong, but this must not be extracted.
+    - The abstract should be translated into Japanese.
+    \n----------------------\n
+    """ + clean_text[:16000]
+    completion = gemini_client.generate_content(content, generation_config=genai.GenerationConfig(response_mime_type="application/json", response_schema=list[PaperMetadata]),)
     # logger.info("DEBUG: " + completion.choices[0].message.function_call.arguments)
-    response = json.loads(completion.choices[0].message.function_call.arguments)
+    response = json.loads(completion.text)[0]
     title = response["title"]
     authors = response["authors"]
     abstract = response["abstract"]
@@ -506,8 +494,8 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     logger.info("assistant: Abstract: " + abstract)
     logger.info("assistant: Abstract (Japanese): " + abstract_ja)
 
-    price = calculate_price(completion, "gpt-4o-mini")
-    logger.info(f"Usage: {price} USD")
+    price = calculate_price(completion, "gemini-1.5-flash")
+    logger.info(f"Usage: {price} USD, responsed by gemini-1.5-flash)")
 
     message = await interaction.followup.send(f"**Title**: {title}")
     thread = await interaction.channel.create_thread(
@@ -518,7 +506,7 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
         f"**Authors**: {authors}",
         f"**Abstract**: {abstract}",
         f"**あらまし**: {abstract_ja}",
-        f"(USAGE: {price} USD)",
+        f"(USAGE: {price} USD, responsed by gemini-1.5-flash)",
     ]
     for response in response_list:
         # もしresponseが長い場合は分割して送信する
@@ -550,14 +538,16 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     while retries > 0:
         try:
             model_for_paper = "gpt-4o-2024-11-20"
-            completion = get_completion(model_for_paper, messages, system=system_paper, timeout=300, max_tokens=4096)
+            # completion = get_completion(model_for_paper, messages, system=system_paper, timeout=300, max_tokens=4096)
+            completion = gemini_client.generate_content(content) # geminiにしてみる
             response = get_response_text(completion)
             logger.info("assistant: " + response)
             response_list = split_string(response)
-            price = calculate_price(completion, model_for_paper)
-            logger.info(f"Usage: {price} USD")
-            response_list.append(f"(USAGE: {price} USD)")
-            messages.append(get_message_log(completion))
+            price = calculate_price(completion, "gemini-1.5-flash") # geminiにしてみる
+            logger.info(f"Usage: {price} USD, responsed by gemini-1.5-flash")
+            response_list.append(f"(USAGE: {price} USD, responsed by gemini-1.5-flash)")
+            # messages.append(get_message_log(completion))
+            messages.append({"role": "assistant", "content": content})
             await message.delete()
             for response in response_list:
                 await thread.send(response)
