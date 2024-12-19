@@ -4,16 +4,16 @@ import math
 import os
 import re
 import tempfile
-import tomllib
 import traceback
 from logging import config, getLogger
 from typing import Union
-import typing_extensions
 
 import anthropic
 import discord
-import openai
 import google.generativeai as genai
+import openai
+import tomllib
+import typing_extensions
 from discord import app_commands
 from dotenv import load_dotenv
 from pdfminer.high_level import extract_text
@@ -174,6 +174,7 @@ def split_string(text: str) -> list[str]:
     ret_list_clean = [s for s in ret_list if s != ""]
     return ret_list_clean
 
+
 def split_text_by_period(text: str) -> list[str]:
     """
     Split a long string into a list of strings each with maximum length 2000,
@@ -188,7 +189,7 @@ def split_text_by_period(text: str) -> list[str]:
     ret_list = []
     while len(text) > 2000:
         # Find the last period within the first 2000 characters
-        split_index = text.rfind('.', 0, 2000)
+        split_index = text.rfind(".", 0, 2000)
         if split_index == -1:
             # If no period is found, split at 2000 characters
             split_index = 2000
@@ -200,6 +201,7 @@ def split_text_by_period(text: str) -> list[str]:
     if text:
         ret_list.append(text)
     return ret_list
+
 
 def get_completion(
     model_engine: str,
@@ -239,7 +241,7 @@ def get_completion(
 
 
 def get_response_text(
-    completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message]
+    completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message],
 ) -> str:
     """Get the response text from the completion object.
 
@@ -259,8 +261,9 @@ def get_response_text(
     elif isinstance(completion, genai.types.GenerateContentResponse):
         return completion.text
 
+
 def get_message_log(
-    completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message]
+    completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message],
 ):
     if isinstance(completion, openai.types.chat.chat_completion.ChatCompletion):
         return completion.choices[0].message.to_dict()
@@ -269,8 +272,9 @@ def get_message_log(
     elif isinstance(completion, genai.types.GenerateContentResponse):
         return completion.candidates[0]
 
+
 def get_total_tokens(
-    completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message]
+    completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message],
 ) -> int:
     """Get the total number of tokens used in the completion object.
 
@@ -400,8 +404,8 @@ async def gpt_switch(interaction: discord.Interaction):
     elif model_engine == "gpt-4o":
         model_engine = "claude-3-5-sonnet-20240620"
     elif model_engine == "claude-3-5-sonnet-20240620":
-    #     model_engine = "gemini-1.5-flash"
-    # elif model_engine == "gemini-1.5-flash":
+        #     model_engine = "gemini-1.5-flash"
+        # elif model_engine == "gemini-1.5-flash":
         model_engine = "gpt-4o-mini"
     response = f"モデルエンジンを {model_engine} に変更しました。"
     logger.info("Change the model engine to " + model_engine)
@@ -435,11 +439,13 @@ def clean_extracted_text(text):
     text = re.sub(r"\s+", " ", text)
     return text
 
+
 class PaperMetadata(typing_extensions.TypedDict):
     title: str
     authors: str
     abstract: str
     abstract_ja: str
+
 
 paper_chat_logs = {}
 # load paper_chat_logs
@@ -482,7 +488,12 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     - The abstract should be translated into Japanese.
     \n----------------------\n
     """ + clean_text[:16000]
-    completion = gemini_client.generate_content(content, generation_config=genai.GenerationConfig(response_mime_type="application/json", response_schema=list[PaperMetadata]),)
+    completion = gemini_client.generate_content(
+        content,
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json", response_schema=list[PaperMetadata]
+        ),
+    )
     # logger.info("DEBUG: " + completion.choices[0].message.function_call.arguments)
     response = json.loads(completion.text)[0]
     title = response["title"]
@@ -539,11 +550,11 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
         try:
             model_for_paper = "gpt-4o-2024-11-20"
             # completion = get_completion(model_for_paper, messages, system=system_paper, timeout=300, max_tokens=4096)
-            completion = gemini_client.generate_content(content) # geminiにしてみる
+            completion = gemini_client.generate_content(content)  # geminiにしてみる
             response = get_response_text(completion)
             logger.info("assistant: " + response)
             response_list = split_string(response)
-            price = calculate_price(completion, "gemini-1.5-flash") # geminiにしてみる
+            price = calculate_price(completion, "gemini-1.5-flash")  # geminiにしてみる
             logger.info(f"Usage: {price} USD, responsed by gemini-1.5-flash")
             response_list.append(f"(USAGE: {price} USD, responsed by gemini-1.5-flash)")
             # messages.append(get_message_log(completion))
@@ -579,10 +590,6 @@ async def on_message(message):
         Exception: If an error occurs while generating a response.
 
     """
-    global chat_log
-    global paper_chat_logs
-    global model_engine
-    global total_token
     if message.author.bot:
         return
     if message.author == client.user:
@@ -594,92 +601,99 @@ async def on_message(message):
     ):
         await on_paper_thread(message)
     if str(message.channel.id) == CHANNEL_ID:
-        msg = await message.reply("生成中...", mention_author=False)
-        # async with message.channel.typing():
-        prompt = message.content
-        if not prompt and not message.attachments:
-            await msg.delete()
-            await message.channel.send("質問内容がありません")
-            return
-        content = []
-        if prompt:
-            content.append({"type": "text", "text": f"{prompt}"})
-        if len(message.attachments) > 0:
-            for attachment in message.attachments:
-                if attachment.content_type.startswith("image"):
-                    # 画像のダウンロード
-                    image_data = await attachment.read()
-                    # 一時ファイルとして保存
-                    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-                        temp_file.write(image_data)
-                    img_path = temp_file.name
-                    # base64
-                    with open(img_path, "rb") as image_file:
-                        base64_image = base64.b64encode(image_file.read()).decode("utf-8")
-                        content.append(format_image_data(base64_image, model_engine))
-                if "text/plain" in attachment.content_type:
-                    # テキストのダウンロード
-                    text_data = await attachment.read()
-                    text = text_data.decode("utf-8")
-                    logger.info(text)
-                    content.append({"type": "text", "text": f"{text}"})
-                if attachment.content_type == "application/pdf":
-                    # PDFのダウンロード
-                    pdf_data = await attachment.read()
-                    # 一時ファイルとして保存
-                    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-                        temp_file.write(pdf_data)
-                    pdf_path = temp_file.name
-                    # テキスト抽出
-                    text = extract_text_from_pdf(pdf_path)
-                    content.append({"type": "text", "text": f"{text}"})
-        chat_log.append({"role": "user", "content": content})
-        logger.info(f"user: {content}")
-        retries = 3
-        while retries > 0:
-            try:
-                completion = get_completion(model_engine, chat_log, system=system, timeout=120, max_tokens=4096)
-                response = get_response_text(completion)
-                response_list = split_string(response)
-                chat_log.append(get_message_log(completion))
-                logger.info("assistant: " + response)
-                price = calculate_price(completion, model_engine)
-                response_list.append(f"(USAGE: {price} USD, responsed by {model_engine})")
-                logger.info(f"Usage: {price} USD, responsed by {model_engine}")
-                total_token += get_total_tokens(completion)
-                if model_engine == "gpt-4o" and total_token > 128000 - 256:
-                    chat_log = chat_log[1:]
-                elif model_engine == "gpt-4o-mini" and total_token > 128000 - 256:
-                    chat_log = chat_log[1:]
-                elif model_engine == "claude-3-5-sonnet-20240620" and total_token > 200000 - 256:
-                    chat_log = chat_log[1:]
-                logger.info(chat_log)
-                # logger.debug(completion)
-                await msg.delete()
-                for response in response_list:
-                    await message.reply(response, mention_author=False)
-                break
-            except openai.APITimeoutError as e:
-                retries -= 1
-                logger.exception(e)
-                await reply_openai_exception(retries, message, e)
-            except openai.BadRequestError as e:
-                retries -= 1
-                logger.exception(e)
-                await reply_openai_exception(retries, message, e)
+        await on_gpt_channel_response(message)
+
+
+async def on_gpt_channel_response(message):
+    global chat_log
+    global paper_chat_logs
+    global model_engine
+    global total_token
+
+    msg = await message.reply("生成中...", mention_author=False)
+    # async with message.channel.typing():
+    prompt = message.content
+    if not prompt and not message.attachments:
+        await msg.delete()
+        await message.channel.send("質問内容がありません")
+        return
+    content = []
+    if prompt:
+        content.append({"type": "text", "text": f"{prompt}"})
+    if len(message.attachments) > 0:
+        for attachment in message.attachments:
+            if attachment.content_type.startswith("image"):
+                # 画像のダウンロード
+                image_data = await attachment.read()
+                # 一時ファイルとして保存
+                with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                    temp_file.write(image_data)
+                img_path = temp_file.name
+                # base64
+                with open(img_path, "rb") as image_file:
+                    base64_image = base64.b64encode(image_file.read()).decode("utf-8")
+                    content.append(format_image_data(base64_image, model_engine))
+            if "text/plain" in attachment.content_type:
+                # テキストのダウンロード
+                text_data = await attachment.read()
+                text = text_data.decode("utf-8")
+                logger.info(text)
+                content.append({"type": "text", "text": f"{text}"})
+            if attachment.content_type == "application/pdf":
+                # PDFのダウンロード
+                pdf_data = await attachment.read()
+                # 一時ファイルとして保存
+                with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                    temp_file.write(pdf_data)
+                pdf_path = temp_file.name
+                # テキスト抽出
+                text = extract_text_from_pdf(pdf_path)
+                content.append({"type": "text", "text": f"{text}"})
+    chat_log.append({"role": "user", "content": content})
+    logger.info(f"user: {content}")
+    retries = 3
+    while retries > 0:
+        try:
+            completion = get_completion(model_engine, chat_log, system=system, timeout=120, max_tokens=4096)
+            response = get_response_text(completion)
+            response_list = split_string(response)
+            chat_log.append(get_message_log(completion))
+            logger.info("assistant: " + response)
+            price = calculate_price(completion, model_engine)
+            response_list.append(f"(USAGE: {price} USD, responsed by {model_engine})")
+            logger.info(f"Usage: {price} USD, responsed by {model_engine}")
+            total_token += get_total_tokens(completion)
+            if model_engine == "gpt-4o" and total_token > 128000 - 256:
                 chat_log = chat_log[1:]
-            except discord.errors.HTTPException as e:
-                logger.exception(e)
-                await message.reply(
-                    f"Discord APIでエラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False
-                )
-                break
-            except Exception as e:
-                logger.exception(e)
-                await message.reply(
-                    f"エラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False
-                )
-                break
+            elif model_engine == "gpt-4o-mini" and total_token > 128000 - 256:
+                chat_log = chat_log[1:]
+            elif model_engine == "claude-3-5-sonnet-20240620" and total_token > 200000 - 256:
+                chat_log = chat_log[1:]
+            logger.info(chat_log)
+            # logger.debug(completion)
+            await msg.delete()
+            for response in response_list:
+                await message.reply(response, mention_author=False)
+            break
+        except openai.APITimeoutError as e:
+            retries -= 1
+            logger.exception(e)
+            await reply_openai_exception(retries, message, e)
+        except openai.BadRequestError as e:
+            retries -= 1
+            logger.exception(e)
+            await reply_openai_exception(retries, message, e)
+            chat_log = chat_log[1:]
+        except discord.errors.HTTPException as e:
+            logger.exception(e)
+            await message.reply(
+                f"Discord APIでエラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False
+            )
+            break
+        except Exception as e:
+            logger.exception(e)
+            await message.reply(f"エラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False)
+            break
 
 
 async def on_paper_thread(message):
