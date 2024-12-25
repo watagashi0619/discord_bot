@@ -12,6 +12,7 @@ import anthropic
 import discord
 import google.generativeai as genai
 import openai
+import requests
 import tomllib
 import typing_extensions
 from discord import app_commands
@@ -44,6 +45,10 @@ anthoropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 gemini_client = genai.GenerativeModel(model_name="gemini-1.5-flash")
 CHANNEL_ID = os.getenv("CHANNEL_ID_GPT")
+PAPER_CHANNEL_ID = os.getenv("CHANNEL_ID_ARXIVEXPORT")
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+
 model_engine = "gpt-4o-2024-11-20"
 chat_log = []
 system = (
@@ -363,6 +368,136 @@ async def reply_openai_exception(retries: int, message: Union[discord.Message, d
         )
 
 
+def fix_title_capitalization(title: str):
+    # 小文字で残す単語のリスト
+    minor_words = {
+        "a",
+        "an",
+        "the",
+        "and",
+        "but",
+        "or",
+        "for",
+        "nor",
+        "on",
+        "at",
+        "to",
+        "by",
+        "with",
+        "in",
+        "of",
+        "up",
+        "out",
+        "as",
+    }
+
+    # タイトルをすべて小文字にしたあと単語に分割
+    words = title.lower().split()
+
+    # 最初と最後の単語は必ず大文字から始める
+    capitalized_title = [
+        word.capitalize() if i == 0 or i == len(words) - 1 else (word if word in minor_words else word.capitalize())
+        for i, word in enumerate(words)
+    ]
+
+    # 結果を結合して新しいタイトルとして返す
+    return " ".join(capitalized_title)
+
+
+def _extract_paper_metadata(clean_text: str):
+    content = """
+    The opening sentence of the paper is given below. From the given text, correctly extract the title, authors' names and abstract, always following the following notes.
+    - In particular, the abstract should be extracted correctly, without word-for-word errors and without any arrangement.
+    - Remove any * or number before or after the name of the author(s).
+    - To ensure that each author can be distinguished, the authors' names are output separated by ", ".
+    - The name of the author(s) may be followed by the name of the organisation to which the author(s) belong, but this must not be extracted.
+    - The abstract should be translated into Japanese.
+    \n----------------------\n
+    """ + clean_text[:16000]
+
+    completion = gemini_client.generate_content(
+        content,
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json", response_schema=list[PaperMetadata]
+        ),
+    )
+
+    response = json.loads(completion.text)[0]
+    title = fix_title_capitalization(response["title"])
+    authors = response["authors"]
+    abstract = response["abstract"]
+    abstract_ja = response["abstract_ja"]
+    logger.info("assistant: Title: " + title)
+    logger.info("assistant: Authors: " + authors)
+    logger.info("assistant: Abstract: " + abstract)
+    logger.info("assistant: Abstract (Japanese): " + abstract_ja)
+
+    price = calculate_price(completion, "gemini-1.5-flash")
+    logger.info(f"Usage: {price} USD, responsed by gemini-1.5-flash)")
+
+    return {"title": title, "authors": authors, "abstract": abstract, "abstract_ja": abstract_ja, "price": price}
+
+
+async def _send_metadata_to_thread(thread, metadata):
+    response_list = [
+        f"**Authors**: {metadata['authors']}",
+        f"**Abstract**: {metadata['abstract']}",
+        f"**あらまし**: {metadata['abstract_ja']}",
+        f"(USAGE: {metadata['price']} USD, responsed by gemini-1.5-flash)",
+    ]
+    for response in response_list:
+        # もしresponseが長い場合は分割して送信する
+        if len(response) > 2000:
+            split_responses = split_text_by_period(response)
+            for split_response in split_responses:
+                await thread.send(split_response)
+        else:
+            await thread.send(response)
+
+
+async def _summary_paper_content(thread, clean_text):
+    content = f"""日本語で答えてください。
+    ユーザーから与えられた論文の内容について、60秒で読めるように、以下のすべての問いに一問一答で答えてください。ただし、専門用語だと思われるものを日本語に翻訳した場合は、翻訳前の用語もあわせて記してください。各回答の間には改行を含めてください。
+    \n----------------------\n
+    {clean_text}
+    \n----------------------\n
+    【目的】この論文の目的は何？
+    【問題意識】先行研究ではどのような点が課題だったか？
+    【手法】この研究の手法は何？独自性は？
+    【結果】どのように有効性を定量、定性的に評価したか？
+    【限界】この論文における限界は？
+    【次の研究の方向性】次に読むべき論文は？（論文番号があれば、それもあわせて）
+    """
+
+    global system_paper
+    messages = [{"role": "user", "content": content}]
+    message = await thread.send("生成中...")
+
+    retries = 3
+    while retries > 0:
+        try:
+            completion = gemini_client.generate_content(content)
+            summary_response = get_response_text(completion)
+            logger.info("assistant: " + summary_response)
+            response_list = split_string(summary_response)
+            price = calculate_price(completion, "gemini-1.5-flash")
+            logger.info(f"Usage: {price} USD, responsed by gemini-1.5-flash")
+            response_list.append(f"(USAGE: {price} USD, responsed by gemini-1.5-flash)")
+            messages.append({"role": "assistant", "content": content})
+            await message.delete()
+            for response in response_list:
+                await thread.send(response)
+            global paper_chat_logs
+            paper_chat_logs[str(thread.id)] = messages
+            with open(paper_chat_logs_json_abspath, "w") as f:
+                json.dump(paper_chat_logs, f, ensure_ascii=False)
+            return summary_response
+        except openai.APITimeoutError as e:
+            retries -= 1
+            logger.exception(e)
+            await reply_openai_exception(retries, thread, e)
+
+
 @client.event
 async def on_ready():
     """on ready"""
@@ -440,6 +575,24 @@ def clean_extracted_text(text):
     return text
 
 
+async def is_valid_link(url: str) -> bool:
+    """
+    指定されたURLが有効かどうかを確認する。
+
+    Args:
+        url (str): チェックするURL。
+
+    Returns:
+        bool: 有効な場合はTrue、無効な場合はFalse。
+    """
+    try:
+        response = requests.head(url, allow_redirects=True)
+        return response.status_code == 200
+    except requests.RequestException as e:
+        logger.error(f"リンクのチェック中にエラーが発生しました: {e}")
+        return False
+
+
 class PaperMetadata(typing_extensions.TypedDict):
     title: str
     authors: str
@@ -477,102 +630,16 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     extracted_text = extract_text_from_pdf(file_path)
     clean_text = clean_extracted_text(extracted_text)
 
-    # extractor = PaperMetaInfo()
-    # title, abstract = extractor.get_title_and_abstract(file_path)
-    content = """
-    The opening sentence of the paper is given below. From the given text, correctly extract the title, authors' names and abstract, always following the following notes.
-    - In particular, the abstract should be extracted correctly, without word-for-word errors and without any arrangement.
-    - Remove any * or number before or after the name of the author(s).
-    - To ensure that each author can be distinguished, the authors' names are output separated by ", ".
-    - The name of the author(s) may be followed by the name of the organisation to which the author(s) belong, but this must not be extracted.
-    - The abstract should be translated into Japanese.
-    \n----------------------\n
-    """ + clean_text[:16000]
-    completion = gemini_client.generate_content(
-        content,
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json", response_schema=list[PaperMetadata]
-        ),
-    )
-    # logger.info("DEBUG: " + completion.choices[0].message.function_call.arguments)
-    response = json.loads(completion.text)[0]
-    title = response["title"]
-    authors = response["authors"]
-    abstract = response["abstract"]
-    abstract_ja = response["abstract_ja"]
-    logger.info("assistant: Title: " + title)
-    logger.info("assistant: Authors: " + authors)
-    logger.info("assistant: Abstract: " + abstract)
-    logger.info("assistant: Abstract (Japanese): " + abstract_ja)
-
-    price = calculate_price(completion, "gemini-1.5-flash")
-    logger.info(f"Usage: {price} USD, responsed by gemini-1.5-flash)")
+    metadata = _extract_paper_metadata(clean_text)
+    title = metadata["title"]
 
     message = await interaction.followup.send(f"**Title**: {title}")
     thread = await interaction.channel.create_thread(
         name=title if len(title) < 100 else title[:97] + "...", message=message, auto_archive_duration=60
     )
 
-    response_list = [
-        f"**Authors**: {authors}",
-        f"**Abstract**: {abstract}",
-        f"**あらまし**: {abstract_ja}",
-        f"(USAGE: {price} USD, responsed by gemini-1.5-flash)",
-    ]
-    for response in response_list:
-        # もしresponseが長い場合は分割して送信する
-        if len(response) > 2000:
-            split_responses = split_text_by_period(response)
-            for split_response in split_responses:
-                await thread.send(split_response)
-        else:
-            await thread.send(response)
-
-    content = f"""日本語で答えてください。
-    ユーザーから与えられた論文の内容について、60秒で読めるように、以下のすべての問いに一問一答で答えてください。ただし、専門用語だと思われるものを日本語に翻訳した場合は、翻訳前の原文もあわせて記してください。
-    \n----------------------\n
-    {clean_text}
-    \n----------------------\n
-    【目的】この論文の目的は何？
-    【問題意識】先行研究ではどのような点が課題だったか？
-    【手法】この研究の手法は何？独自性は？
-    【結果】どのように有効性を定量、定性的に評価したか？
-    【限界】この論文における限界は？
-    【次の研究の方向性】次に読むべき論文は？（論文番号があれば、それもあわせて）
-    """
-
-    global system_paper
-    messages = [{"role": "user", "content": content}]
-    message = await thread.send("生成中...")
-
-    retries = 3
-    while retries > 0:
-        try:
-            model_for_paper = "gpt-4o-2024-11-20"
-            # completion = get_completion(model_for_paper, messages, system=system_paper, timeout=300, max_tokens=4096)
-            completion = gemini_client.generate_content(content)  # geminiにしてみる
-            response = get_response_text(completion)
-            logger.info("assistant: " + response)
-            response_list = split_string(response)
-            price = calculate_price(completion, "gemini-1.5-flash")  # geminiにしてみる
-            logger.info(f"Usage: {price} USD, responsed by gemini-1.5-flash")
-            response_list.append(f"(USAGE: {price} USD, responsed by gemini-1.5-flash)")
-            # messages.append(get_message_log(completion))
-            messages.append({"role": "assistant", "content": content})
-            await message.delete()
-            for response in response_list:
-                await thread.send(response)
-            break
-        except openai.APITimeoutError as e:
-            retries -= 1
-            logger.exception(e)
-            await reply_openai_exception(retries, thread, e)
-
-    global paper_chat_logs
-    paper_chat_logs[str(thread.id)] = messages
-    # export paper_chat_logs
-    with open(paper_chat_logs_json_abspath, "w") as f:
-        json.dump(paper_chat_logs, f, ensure_ascii=False)
+    await _send_metadata_to_thread(thread, metadata)
+    await _summary_paper_content(thread, clean_text)
 
 
 @client.event
@@ -594,6 +661,17 @@ async def on_message(message):
         return
     if message.author == client.user:
         return
+    if str(message.channel.id) == PAPER_CHANNEL_ID and any(
+        link in message.content
+        for link in [
+            "https://arxiv.org",
+            "https://proceedings.mlr.press",
+            "https://openreview.net",
+            "https://proceedings.neurips.cc",
+            ".pdf",
+        ]
+    ):
+        await on_paper_link(message)
     if (
         message.channel.type == discord.ChannelType.public_thread
         and message.channel.owner_id == client.user.id
@@ -604,24 +682,205 @@ async def on_message(message):
         await on_gpt_channel_response(message)
 
 
-async def on_gpt_channel_response(message):
-    global chat_log
-    global paper_chat_logs
-    global model_engine
-    global total_token
-
+async def on_paper_link(message):
+    # メッセージがリンクのみであることを確認
     msg = await message.reply("生成中...", mention_author=False)
-    # async with message.channel.typing():
-    prompt = message.content
-    if not prompt and not message.attachments:
-        await msg.delete()
-        await message.channel.send("質問内容がありません")
+    if not message.content.startswith("http"):
+        await message.channel.send("メッセージにリンクが含まれていません")
         return
+
+    raw_link = message.content
+    pdf_link = raw_link
+    if "https://arxiv.org" in raw_link:
+        pdf_link = message.content.replace("abs", "pdf")
+    elif "https://proceedings.mlr.press" in raw_link:
+        if "html" in raw_link:
+            parts = raw_link.rsplit("/", 1)
+            part_head = parts[0]
+            part_tail = parts[-1].replace(".html", "")
+            pdf_link = f"{part_head}/{part_tail}/{part_tail}.pdf"
+    elif "https://openreview.net" in raw_link:
+        if "pdf" not in raw_link:
+            pdf_link = message.content.replace("forum", "pdf")
+    elif "https://proceedings.neurips.cc" in raw_link:
+        if "html" in raw_link:
+            pdf_link = raw_link.replace("/hash/", "/file/")
+            pdf_link = pdf_link.replace("Abstract-Conference.html", "Paper-Conference.pdf")
+
+    # PDFリンクの有効性をチェック
+    if pdf_link and await is_valid_link(pdf_link):
+        logger.info(f"有効なPDFリンクを取得: {pdf_link}")
+        pdf_response = requests.get(pdf_link)
+        file_name = pdf_link.split("/")[-1]
+        file_path = os.path.join(paper_folder_abspath, file_name)
+        with open(file_path, "wb") as pdf_file:
+            pdf_file.write(pdf_response.content)
+        logger.info("download and saved " + file_path)
+    else:
+        logger.warning(f"無効なPDFリンク: {pdf_link}")
+        await message.channel.send("PDFリンクの取得に失敗しました")
+    extracted_text = extract_text_from_pdf(file_path)
+    clean_text = clean_extracted_text(extracted_text)
+
+    metadata = _extract_paper_metadata(clean_text)
+    title = metadata["title"]
+    await msg.delete()
+    thread = await message.channel.create_thread(
+        name=title if len(title) < 100 else title[:97] + "...", message=message, auto_archive_duration=60
+    )
+    await thread.send(f"**Title**: {title}")
+    await _send_metadata_to_thread(thread, metadata)
+    summary = await _summary_paper_content(thread, clean_text)
+    if NOTION_TOKEN is not None:
+        thread_url = thread.jump_url
+        post_to_notion_database(metadata, raw_link, thread_url, summary)
+
+
+def split_text(text, max_length=2000):
+    return [text[i : i + max_length] for i in range(0, len(text), max_length)]
+
+
+def format_chunk(chunk):
+    # **text** の形式を検出して太字にする
+    bold_pattern = re.compile(r"\*\*(.*?)\*\*")
+    parts = []
+    last_end = 0
+
+    for match in bold_pattern.finditer(chunk):
+        start, end = match.span()
+        # 通常のテキスト部分を追加
+        if start > last_end:
+            parts.append({"type": "text", "text": {"content": chunk[last_end:start]}})
+        # 太字部分を追加
+        parts.append({"type": "text", "text": {"content": match.group(1)}, "annotations": {"bold": True}})
+        last_end = end
+
+    # 残りのテキストを追加
+    if last_end < len(chunk):
+        parts.append({"type": "text", "text": {"content": chunk[last_end:]}})
+
+    return parts
+
+
+def post_to_notion_database(metadata, link: str, thread_url: str, summary: str):
+    """
+    Posts the given information to a Notion database.
+
+    Args:
+        link (str): Holds the URL link to the original content.
+        thread_url (str): Provides the URL link to the Discord thread.
+        summary (str): Includes the summary of the paper content.
+
+    Returns:
+        None
+
+    Raises:
+        None
+    """
+    title = metadata["title"]
+    authors = metadata["authors"]
+    abstract_ja = metadata["abstract_ja"]
+
+    notion_page_url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+    data = json.dumps(
+        {
+            "parent": {"database_id": f"{NOTION_DATABASE_ID}"},
+            "properties": {
+                "link": {
+                    "rich_text": [
+                        {"text": {"content": f"{link}", "link": {"url": f"{link}"}}},
+                        {"text": {"content": ", "}},
+                        {"text": {"content": f"{thread_url}", "link": {"url": f"{thread_url}"}}},
+                    ]
+                },
+                "名前": {"title": [{"text": {"content": f"{title}"}}]},
+                "Author": {"rich_text": [{"text": {"content": f"{authors}"}}]},
+            },
+        }
+    )
+
+    response = requests.post(notion_page_url, headers=headers, data=data)
+
+    if response.status_code == 200:
+        notion_page_id = response.json().get("id")
+        notion_page_url = f"https://www.notion.so/{notion_page_id.replace('-', '')}"
+        logger.info(f"Notionページが作成されました: {notion_page_url}")
+
+        # abstract_jaとsummaryを2000文字以下に分割
+        abstract_ja = "**あらまし**: " + abstract_ja
+        abstract_chunks = split_text(abstract_ja)
+        summary_lines = summary.split("\n")
+        summary_chunks = [chunk for line in summary_lines for chunk in split_text(line)]
+
+        # summaryを追加するためのデータ
+        summary_data = json.dumps(
+            {
+                "children": [
+                    {
+                        "object": "block",
+                        "type": "heading_2",
+                        "heading_2": {"rich_text": [{"text": {"content": "Abstract"}}]},
+                    },
+                    *[
+                        {
+                            "object": "block",
+                            "type": "paragraph",
+                            "paragraph": {
+                                "rich_text": format_chunk(chunk)
+                            },
+                        }
+                        for chunk in abstract_chunks
+                    ],
+                    {
+                        "object": "block",
+                        "type": "heading_2",
+                        "heading_2": {"rich_text": [{"text": {"content": "Summary"}}]},
+                    },
+                    *[
+                        {
+                            "object": "block",
+                            "type": "paragraph",
+                            "paragraph": {
+                                "rich_text": format_chunk(chunk)
+                            },
+                        }
+                        for chunk in summary_chunks
+                    ],
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {"rich_text": [{"text": {"content": "(summarized by gemini-1.5-flash)"}}]},
+                    },
+                ]
+            }
+        )
+
+        # Notion APIを使ってsummaryを追加
+        summary_url = f"https://api.notion.com/v1/blocks/{notion_page_id}/children"
+        summary_response = requests.patch(summary_url, headers=headers, data=summary_data)
+
+        if summary_response.status_code == 200:
+            logger.info("Notionページにsummaryが追加されました。")
+        else:
+            logger.error(f"Notionページへのsummary追加に失敗しました: {summary_response.text}")
+    else:
+        logger.info(f"Notionページへのエクスポートに失敗しました:\n {response}")
+
+
+async def extract_message_content(message):
+    prompt = message.content
+    attachments = message.attachments
     content = []
     if prompt:
         content.append({"type": "text", "text": f"{prompt}"})
-    if len(message.attachments) > 0:
-        for attachment in message.attachments:
+    if len(attachments) > 0:
+        for attachment in attachments:
             if attachment.content_type.startswith("image"):
                 # 画像のダウンロード
                 image_data = await attachment.read()
@@ -649,6 +908,22 @@ async def on_gpt_channel_response(message):
                 # テキスト抽出
                 text = extract_text_from_pdf(pdf_path)
                 content.append({"type": "text", "text": f"{text}"})
+    return content
+
+
+async def on_gpt_channel_response(message):
+    global chat_log
+    global paper_chat_logs
+    global model_engine
+    global total_token
+
+    msg = await message.reply("生成中...", mention_author=False)
+    prompt = message.content
+    if not prompt and not message.attachments:
+        await msg.delete()
+        await message.channel.send("質問内容がありません")
+        return
+    content = await extract_message_content(message)
     chat_log.append({"role": "user", "content": content})
     logger.info(f"user: {content}")
     retries = 3
@@ -710,8 +985,8 @@ async def on_paper_thread(message):
     global system_paper
 
     msg = await message.reply("生成中...", mention_author=False)
-    prompt = message.content
-    paper_chat_logs[str(message.channel.id)].append({"role": "user", "content": prompt})
+    content = await extract_message_content(message)
+    paper_chat_logs[str(message.channel.id)].append({"role": "user", "content": content})
     retries = 3
     while retries > 0:
         try:
