@@ -118,7 +118,7 @@ def calculate_price(
         )
     elif model_engine == "gpt-4o":
         price = round_to_digits(
-            completion.usage.prompt_tokens * 5.00 / 1000000 + completion.usage.completion_tokens * 15.00 / 1000000,
+            completion.usage.prompt_tokens * 2.50 / 1000000 + completion.usage.completion_tokens * 10.00 / 1000000,
             3,
         )
     elif model_engine == "gpt-4o-2024-11-20":
@@ -126,12 +126,27 @@ def calculate_price(
             completion.usage.prompt_tokens * 2.50 / 1000000 + completion.usage.completion_tokens * 10.00 / 1000000,
             3,
         )
+    elif model_engine == "o1-preview":
+        price = round_to_digits(
+            completion.usage.prompt_tokens * 15.00 / 1000000 + completion.usage.completion_tokens * 60.00 / 1000000,
+            3,
+        )
     elif model_engine == "gpt-4o-mini":
         price = round_to_digits(
             completion.usage.prompt_tokens * 0.15 / 1000000 + completion.usage.completion_tokens * 0.60 / 1000000,
             3,
         )
-    elif model_engine == "claude-3-5-sonnet-20240620":
+    elif model_engine == "o1-mini":
+        price = round_to_digits(
+            completion.usage.prompt_tokens * 3.00 / 1000000 + completion.usage.completion_tokens * 12.00 / 1000000,
+            3,
+        )
+    elif model_engine == "o3-mini":
+        price = round_to_digits(
+            completion.usage.prompt_tokens * 3.00 / 1000000 + completion.usage.completion_tokens * 12.00 / 1000000,
+            3,
+        )
+    elif model_engine == "claude-3-5-sonnet-20241022":
         price = round_to_digits(
             completion.usage.input_tokens * 3.00 / 1000000 + completion.usage.output_tokens * 15.00 / 1000000,
             3,
@@ -234,6 +249,10 @@ def get_completion(
         system_set = [{"role": "system", "content": system}] if system else []
         return openai_client.chat.completions.create(
             model=model_engine, messages=system_set + messages, timeout=timeout, max_tokens=max_tokens
+        )
+    elif "o1" in model_engine or "o3" in model_engine:
+        return openai_client.chat.completions.create(
+            model=model_engine, messages=messages, timeout=timeout
         )
     elif "claude" in model_engine:
         return anthoropic_client.messages.create(
@@ -537,8 +556,14 @@ async def gpt_switch(interaction: discord.Interaction):
     elif model_engine == "gpt-4o-2024-11-20":
         model_engine = "gpt-4o"
     elif model_engine == "gpt-4o":
-        model_engine = "claude-3-5-sonnet-20240620"
-    elif model_engine == "claude-3-5-sonnet-20240620":
+        model_engine = "o1-preview"
+    elif model_engine == "o1-preview":
+        model_engine = "o1-mini"
+    elif model_engine == "o1-mini":
+        model_engine = "o3-mini"
+    elif model_engine == "o3-mini":
+        model_engine = "claude-3-5-sonnet-20241022"
+    elif model_engine == "claude-3-5-sonnet-20241022":
         #     model_engine = "gemini-1.5-flash"
         # elif model_engine == "gemini-1.5-flash":
         model_engine = "gpt-4o-mini"
@@ -906,7 +931,7 @@ async def extract_message_content(message):
                     temp_file.write(pdf_data)
                 pdf_path = temp_file.name
                 # テキスト抽出
-                text = extract_text_from_pdf(pdf_path)
+                text = clean_extracted_text(extract_text_from_pdf(pdf_path))
                 content.append({"type": "text", "text": f"{text}"})
     return content
 
@@ -942,7 +967,7 @@ async def on_gpt_channel_response(message):
                 chat_log = chat_log[1:]
             elif model_engine == "gpt-4o-mini" and total_token > 128000 - 256:
                 chat_log = chat_log[1:]
-            elif model_engine == "claude-3-5-sonnet-20240620" and total_token > 200000 - 256:
+            elif model_engine == "claude-3-5-sonnet-20241022" and total_token > 200000 - 256:
                 chat_log = chat_log[1:]
             logger.info(chat_log)
             # logger.debug(completion)
