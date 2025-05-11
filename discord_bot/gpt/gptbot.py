@@ -7,16 +7,17 @@ import tempfile
 import traceback
 from logging import config, getLogger
 from typing import Union
+from urllib.parse import urlparse
 
 import anthropic
 import discord
-import google.generativeai as genai
 import openai
 import requests
 import tomllib
 import typing_extensions
 from discord import app_commands
 from dotenv import load_dotenv
+from google import genai
 from pdfminer.high_level import extract_text
 
 current_folder_abspath = os.path.dirname(os.path.abspath(__file__))
@@ -42,20 +43,24 @@ tree = app_commands.CommandTree(client)
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN_GPT")
 openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 anthoropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-gemini_client = genai.GenerativeModel(model_name="gemini-1.5-flash")
+gemini_openai_client = openai.OpenAI(
+    api_key=os.getenv("GEMINI_API_KEY"),
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+) # geminiをopeanaiのクライアントから呼び出す
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 CHANNEL_ID = os.getenv("CHANNEL_ID_GPT")
 PAPER_CHANNEL_ID = os.getenv("CHANNEL_ID_ARXIVEXPORT")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
-model_engine = "gpt-4o-2024-11-20"
+model_engine = "gemini-2.0-flash"
 chat_log = []
-system = (
-    "あなたの名前は「ことのせ つむぐ」で、私をアシストしてくれる優しい女の子です。"
-    + "敬語や丁寧語、「ですます」調を一切使わずにタメ口で返答してください。"
-    + "タメ口とは、敬語や丁寧語を一切使わずに話すこと。文末の動詞や助詞を省略したり、体言止めを使ったりすることがよくあります。親しみやすさを出すために、くだけた表現やスラング、略語などが使われることがあります。"
-)
+# system = (
+    # "あなたの名前は「ことのせ つむぐ」で、私をアシストしてくれる優しい女の子です。"
+    # + "敬語や丁寧語、「ですます」調を一切使わずにタメ口で返答してください。"
+    # + "タメ口とは、敬語や丁寧語を一切使わずに話すこと。文末の動詞や助詞を省略したり、体言止めを使ったりすることがよくあります。親しみやすさを出すために、くだけた表現やスラング、略語などが使われることがあります。"
+# )
+system = "あなたの名前は「ことのせ つむぐ」で、数理科学を専攻する大学院生である私のAIアシスタントです。"
 system_paper = "You are a researcher. You give thoughtful answers, taking into account the back and forth queries."
 total_token = 0
 
@@ -126,9 +131,29 @@ def calculate_price(
             completion.usage.prompt_tokens * 2.50 / 1000000 + completion.usage.completion_tokens * 10.00 / 1000000,
             3,
         )
-    elif model_engine == "o1-preview":
+    elif model_engine == "gpt-4.1":
         price = round_to_digits(
-            completion.usage.prompt_tokens * 15.00 / 1000000 + completion.usage.completion_tokens * 60.00 / 1000000,
+            completion.usage.prompt_tokens * 2.00 / 1000000 + completion.usage.completion_tokens * 8.00 / 1000000,
+            3,
+        )
+    elif model_engine == "gpt-4.1-mini":
+        price = round_to_digits(
+            completion.usage.prompt_tokens * 0.40 / 1000000 + completion.usage.completion_tokens * 1.60 / 1000000,
+            3,
+        )
+    elif model_engine == "gpt-4.1-nano":
+        price = round_to_digits(
+            completion.usage.prompt_tokens * 0.10 / 1000000 + completion.usage.completion_tokens * 0.40 / 1000000,
+            3,
+        )
+    elif model_engine == "o4-mini":
+        price = round_to_digits(
+            completion.usage.prompt_tokens * 1.10 / 1000000 + completion.usage.completion_tokens * 4.40 / 1000000,
+            3,
+        )
+    elif model_engine == "o3":
+        price = round_to_digits(
+            completion.usage.prompt_tokens * 10.0 / 1000000 + completion.usage.completion_tokens * 40.0 / 1000000,
             3,
         )
     elif model_engine == "gpt-4o-mini":
@@ -136,22 +161,17 @@ def calculate_price(
             completion.usage.prompt_tokens * 0.15 / 1000000 + completion.usage.completion_tokens * 0.60 / 1000000,
             3,
         )
-    elif model_engine == "o1-mini":
+    elif model_engine == "claude-3-5-haiku-20241022":
         price = round_to_digits(
-            completion.usage.prompt_tokens * 3.00 / 1000000 + completion.usage.completion_tokens * 12.00 / 1000000,
+            completion.usage.input_tokens * 0.80 / 1000000 + completion.usage.output_tokens * 4.00 / 1000000,
             3,
         )
-    elif model_engine == "o3-mini":
-        price = round_to_digits(
-            completion.usage.prompt_tokens * 3.00 / 1000000 + completion.usage.completion_tokens * 12.00 / 1000000,
-            3,
-        )
-    elif model_engine == "claude-3-5-sonnet-20241022":
+    elif model_engine == "claude-3-7-sonnet-20250219":
         price = round_to_digits(
             completion.usage.input_tokens * 3.00 / 1000000 + completion.usage.output_tokens * 15.00 / 1000000,
             3,
         )
-    elif model_engine == "gemini-1.5-flash":
+    elif "gemini" in model_engine:
         price = 0
     return price
 
@@ -228,7 +248,7 @@ def get_completion(
     messages: list[str],
     system=None,
     timeout: int = 120,
-    max_tokens: int = 4096,
+    max_tokens: int = 16384,
 ):
     """Get completion from OpenAI API or Anthropic API.
 
@@ -250,7 +270,7 @@ def get_completion(
         return openai_client.chat.completions.create(
             model=model_engine, messages=system_set + messages, timeout=timeout, max_tokens=max_tokens
         )
-    elif "o1" in model_engine or "o3" in model_engine:
+    elif "o3" in model_engine or "o4-mini" in model_engine:
         return openai_client.chat.completions.create(
             model=model_engine, messages=messages, timeout=timeout
         )
@@ -260,9 +280,14 @@ def get_completion(
             messages=messages,
             system=system,
             timeout=timeout,
-            max_tokens=max_tokens,
+            max_tokens=8192,
         )
-
+    elif "gemini" in model_engine:
+        system_set = [{"role": "system", "content": system}] if system else []
+        # なんかsystem入れたら毎回名乗り出したので消す
+        return gemini_openai_client.chat.completions.create(
+            model=model_engine, messages=messages, timeout=timeout
+        )
 
 def get_response_text(
     completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message],
@@ -286,11 +311,22 @@ def get_response_text(
         return completion.text
 
 
+def remove_refusal_field(responses):
+    # 'refusal'フィールドを削除 これがあるとgeminiのAPIがエラーを返す
+    if isinstance(responses, list):
+        for response in responses:
+            if 'refusal' in response:
+                del response['refusal']
+    elif isinstance(responses, dict):
+        if 'refusal' in responses:
+            del responses['refusal']
+    return responses
+
 def get_message_log(
     completion: Union[openai.types.chat.chat_completion.ChatCompletion, anthropic.types.message.Message],
 ):
     if isinstance(completion, openai.types.chat.chat_completion.ChatCompletion):
-        return completion.choices[0].message.to_dict()
+        return remove_refusal_field(completion.choices[0].message.to_dict())
     elif isinstance(completion, anthropic.types.message.Message):
         return {"role": completion.role, "content": completion.content[0].text}
     elif isinstance(completion, genai.types.GenerateContentResponse):
@@ -330,9 +366,9 @@ def format_image_data(base64_image: str, model_engine: str) -> dict:
     Raises:
         None: The function does not raise any exceptions.
     """
-    is_gpt = "gpt" in model_engine
+    is_gpt_or_gemini = ("gpt" in model_engine) or ("o3" in model_engine) or ("o4-mini" in model_engine) or ("gemini" in model_engine)
 
-    if is_gpt:
+    if is_gpt_or_gemini:
         return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
     else:
         return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64_image}}
@@ -434,14 +470,28 @@ def _extract_paper_metadata(clean_text: str):
     \n----------------------\n
     """ + clean_text[:16000]
 
-    completion = gemini_client.generate_content(
-        content,
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json", response_schema=list[PaperMetadata]
-        ),
+    completion = gemini_client.models.generate_content(
+    model="gemini-2.0-flash", contents=content, config={
+        'response_mime_type': 'application/json',
+        'response_schema': {
+            "required": [
+                "title",
+                "authors",
+                "abstract",
+                "abstract_ja",
+            ],
+            "properties": {
+                "title": {"type": "STRING"},
+                "authors": {"type": "STRING"},
+                "abstract": {"type": "STRING"},
+                "abstract_ja": {"type": "STRING"},
+            },
+            "type": "OBJECT",
+            }
+        },
     )
 
-    response = json.loads(completion.text)[0]
+    response = json.loads(completion.text)
     title = fix_title_capitalization(response["title"])
     authors = response["authors"]
     abstract = response["abstract"]
@@ -451,8 +501,8 @@ def _extract_paper_metadata(clean_text: str):
     logger.info("assistant: Abstract: " + abstract)
     logger.info("assistant: Abstract (Japanese): " + abstract_ja)
 
-    price = calculate_price(completion, "gemini-1.5-flash")
-    logger.info(f"Usage: {price} USD, responsed by gemini-1.5-flash)")
+    price = calculate_price(completion, "gemini-2.0-flash")
+    logger.info(f"Usage: {price} USD, responsed by gemini-2.0-flash)")
 
     return {"title": title, "authors": authors, "abstract": abstract, "abstract_ja": abstract_ja, "price": price}
 
@@ -462,7 +512,7 @@ async def _send_metadata_to_thread(thread, metadata):
         f"**Authors**: {metadata['authors']}",
         f"**Abstract**: {metadata['abstract']}",
         f"**あらまし**: {metadata['abstract_ja']}",
-        f"(USAGE: {metadata['price']} USD, responsed by gemini-1.5-flash)",
+        f"(USAGE: {metadata['price']} USD, responsed by gemini-2.0-flash)",
     ]
     for response in response_list:
         # もしresponseが長い場合は分割して送信する
@@ -476,7 +526,7 @@ async def _send_metadata_to_thread(thread, metadata):
 
 async def _summary_paper_content(thread, clean_text):
     content = f"""日本語で答えてください。
-    ユーザーから与えられた論文の内容について、60秒で読めるように、以下のすべての問いに一問一答で答えてください。ただし、専門用語だと思われるものを日本語に翻訳した場合は、翻訳前の用語もあわせて記してください。各回答の間には改行を含めてください。
+    ユーザーから与えられた論文の内容について、60秒で読めるように、以下のすべての問いに一問一答で答えてください。ただし、専門用語だと思われるものを日本語に翻訳した場合は、翻訳前の用語もあわせて記してください。各回答内では箇条書きの使用は禁止です。各回答内では改行してはいけません。各回答の間には改行を含めてください。
     \n----------------------\n
     {clean_text}
     \n----------------------\n
@@ -495,14 +545,14 @@ async def _summary_paper_content(thread, clean_text):
     retries = 3
     while retries > 0:
         try:
-            completion = gemini_client.generate_content(content)
+            completion = gemini_client.models.generate_content(model="gemini-2.0-flash",contents=content)
             summary_response = get_response_text(completion)
             logger.info("assistant: " + summary_response)
             response_list = split_string(summary_response)
-            price = calculate_price(completion, "gemini-1.5-flash")
-            logger.info(f"Usage: {price} USD, responsed by gemini-1.5-flash")
-            response_list.append(f"(USAGE: {price} USD, responsed by gemini-1.5-flash)")
-            messages.append({"role": "assistant", "content": content})
+            price = calculate_price(completion, "gemini-2.0-flash")
+            logger.info(f"Usage: {price} USD, responsed by gemini-2.0-flash")
+            response_list.append(f"(USAGE: {price} USD, responsed by gemini-2.0-flash)")
+            messages.append({"role": "assistant", "content": summary_response})
             await message.delete()
             for response in response_list:
                 await thread.send(response)
@@ -511,11 +561,122 @@ async def _summary_paper_content(thread, clean_text):
             with open(paper_chat_logs_json_abspath, "w") as f:
                 json.dump(paper_chat_logs, f, ensure_ascii=False)
             return summary_response
-        except openai.APITimeoutError as e:
+        except Exception as e:
             retries -= 1
             logger.exception(e)
-            await reply_openai_exception(retries, thread, e)
+            await thread.send(f"Gemini APIでエラーが発生しました。リトライします（残回数{retries}）。\n{traceback.format_exception_only(e)}")
 
+
+async def _extract_challenging_words_for_english_learners(thread, clean_text: str):
+    content = """
+    Identify at least 10 words in the text of this paper that might be challenging for English learners. For each word:
+    - Provide the English word.
+    - Give its Japanese translation.
+    - Create or extract an example sentence using only one word from the list.
+    - Include the Japanese translation of the example sentence.
+
+    Make sure that the target English word and its Japanese translation are **bold** in the example sentences. Example sentences can come from the paper itself or be original.
+    \n----------------------\n
+    """ + clean_text
+
+    completion = gemini_client.models.generate_content(
+        model='gemini-2.0-flash',
+        contents=content,
+        config={
+            'response_mime_type': 'application/json',
+            'response_schema': {
+                'type': 'ARRAY',
+                "items": {
+                    'required': [
+                        'en_word',
+                        'ja_translation',
+                        'example_sentence',
+                        'ja_example_sentence',
+                    ],
+                    'properties': {
+                        'en_word': {'type': 'STRING'},
+                        'ja_translation': {'type': 'STRING'},
+                        'example_sentence': {'type': 'STRING'},
+                        'ja_example_sentence': {'type': 'STRING'},
+                    },
+                    'type': 'OBJECT',
+                }
+            },
+        },
+    )
+    response = json.loads(completion.text)
+    blocks = []
+    for res in response:
+        en_word = res['en_word']
+        ja_translation = res['ja_translation']
+        example_sentence = res['example_sentence']
+        ja_example_sentence = res['ja_example_sentence']
+        block = (
+            f"- {en_word}: {ja_translation}\n"
+            f"  - **例文**: {example_sentence}\n"
+            f"  - **訳**: {ja_example_sentence}\n"
+        )
+        blocks.append(block)
+
+    # 2000文字以下になるようにブロックを結合
+    combined_responses = []
+    current_response = ""
+    for block in blocks:
+        if len(current_response) + len(block) > 2000:
+            combined_responses.append(current_response)
+            current_response = block
+        else:
+            current_response += block
+    if current_response:
+        combined_responses.append(current_response)
+
+    # 分割されたレスポンスを送信
+    try:
+        for response in combined_responses:
+            await thread.send(response)
+    except Exception as e:
+        error_message = f"エラーが発生しました: {str(e)}"
+        await thread.send(error_message)
+
+async def _extract_keywords_from_paper(thread, clean_text: str):
+    content = """
+    Identify at least 4 keywords from the text of this paper in lowercase.
+
+    Make sure that the keywords are relevant to the main topics of the paper.
+    \n----------------------\n
+    """ + clean_text
+
+    completion = gemini_client.models.generate_content(
+        model='gemini-2.0-flash',
+        contents=content,
+        config={
+            'response_mime_type': 'application/json',
+            'response_schema': {
+                'type': 'ARRAY',
+                "items": {
+                    'required': [
+                        'keyword',
+                    ],
+                    'properties': {
+                        'keyword': {'type': 'STRING'},
+                    },
+                    'type': 'OBJECT',
+                }
+            },
+        },
+    )
+    response = json.loads(completion.text)
+    keywords_list = [{"name": res['keyword']} for res in response]
+    keywords = "**Keywords**: " + ", ".join([res['name'] for res in keywords_list])
+
+    # 分割されたレスポンスを送信
+    try:
+        await thread.send(keywords)
+    except Exception as e:
+        error_message = f"エラーが発生しました: {str(e)}"
+        await thread.send(error_message)
+    
+    return keywords_list
 
 @client.event
 async def on_ready():
@@ -541,37 +702,31 @@ async def gpt_delete(interaction: discord.Interaction):
     await interaction.response.send_message(response)
 
 
-@tree.command(name="gpt-switch", description="chat gptモデルをgpt-4o-miniとgpt-4oの間で切り替える")
-async def gpt_switch(interaction: discord.Interaction):
-    """switching the ChatGPT model between gpt-4o-mini and gpt-4o.
-
-    Args:
-        interaction (discord.Interaction): interaction.
-    """
-    logger.info("command: gpt-switch")
-    global model_engine
-    global chat_log
-    if model_engine == "gpt-4o-mini":
-        model_engine = "gpt-4o-2024-11-20"
-    elif model_engine == "gpt-4o-2024-11-20":
-        model_engine = "gpt-4o"
-    elif model_engine == "gpt-4o":
-        model_engine = "o1-preview"
-    elif model_engine == "o1-preview":
-        model_engine = "o1-mini"
-    elif model_engine == "o1-mini":
-        model_engine = "o3-mini"
-    elif model_engine == "o3-mini":
-        model_engine = "claude-3-5-sonnet-20241022"
-    elif model_engine == "claude-3-5-sonnet-20241022":
-        #     model_engine = "gemini-1.5-flash"
-        # elif model_engine == "gemini-1.5-flash":
-        model_engine = "gpt-4o-mini"
+@tree.command(name="gpt-switch", description="使用するチャットモデルを設定します")
+@app_commands.describe(model="使用するモデルを選択してください")
+@app_commands.choices(model=[
+    app_commands.Choice(name="GPT-4o", value="gpt-4o"),
+    app_commands.Choice(name="GPT-4o-2024-11-20", value="gpt-4o-2024-11-20"),
+    app_commands.Choice(name="GPT-4o-mini", value="gpt-4o-mini"),
+    app_commands.Choice(name="GPT-4.1", value="gpt-4.1"),
+    app_commands.Choice(name="GPT-4.1-mini", value="gpt-4.1-mini"),
+    app_commands.Choice(name="GPT-4.1-nano", value="gpt-4.1-nano"),
+    app_commands.Choice(name="o4-mini", value="o4-mini"),
+    app_commands.Choice(name="o3", value="o3"),
+    app_commands.Choice(name="Gemini-2.0-flash", value="gemini-2.0-flash"),
+    app_commands.Choice(name="Gemini-2.0-flash-thinking-exp-01-21", value="gemini-2.0-flash-thinking-exp-01-21"),
+    app_commands.Choice(name="Gemini-2.5-pro-exp-03-25", value="gemini-2.5-pro-exp-03-25"),
+    app_commands.Choice(name="Gemini-2.5-flash-preview-04-17", value="gemini-2.5-flash-preview-04-17"),
+    app_commands.Choice(name="Claude-3.5-haiku-20241022", value="claude-3-5-haiku-20241022"),
+    app_commands.Choice(name="Claude-3.7-sonnet-20250219", value="claude-3-7-sonnet-20250219"),
+])
+async def set_model(interaction: discord.Interaction, model: app_commands.Choice[str]):
+    global model_engine, chat_log
+    model_engine = model.value
+    chat_log = convert_messages(chat_log, model_engine)
     response = f"モデルエンジンを {model_engine} に変更しました。"
     logger.info("Change the model engine to " + model_engine)
-    chat_log = convert_messages(chat_log, model_engine)
     await interaction.response.send_message(response)
-
 
 @tree.command(name="gpt-system", description="chat gptのキャラクター設定をする")
 async def gpt_system(interaction: discord.Interaction, prompt: str):
@@ -664,7 +819,12 @@ async def paper_interpreter(interaction: discord.Interaction, pdf_file: discord.
     )
 
     await _send_metadata_to_thread(thread, metadata)
-    await _summary_paper_content(thread, clean_text)
+    keywords_list = await _extract_keywords_from_paper(thread, clean_text)
+    summary = await _summary_paper_content(thread, clean_text)
+    await _extract_challenging_words_for_english_learners(thread, clean_text)
+    if NOTION_TOKEN is not None:
+        thread_url = thread.jump_url
+        post_to_notion_database(metadata, "", thread_url, summary, keywords_list)
 
 
 @client.event
@@ -686,32 +846,52 @@ async def on_message(message):
         return
     if message.author == client.user:
         return
-    if str(message.channel.id) == PAPER_CHANNEL_ID and any(
-        link in message.content
-        for link in [
-            "https://arxiv.org",
-            "https://proceedings.mlr.press",
-            "https://openreview.net",
-            "https://proceedings.neurips.cc",
-            ".pdf",
-        ]
-    ):
-        await on_paper_link(message)
+
+    # Handle messages in PAPER_CHANNEL_ID
+    if str(message.channel.id) == PAPER_CHANNEL_ID:
+        # Check for PDF attachments first
+        if message.attachments:
+            for attachment in message.attachments:
+                if attachment.filename.lower().endswith(".pdf") or \
+                   attachment.content_type == "application/pdf":
+                    await on_paper_attachment(message, attachment)
+                    return  # Process only the first PDF attachment
+
+        # If no PDF attachment processed, check for links
+        if any(
+            link_keyword in message.content
+            for link_keyword in [
+                "https://arxiv.org",
+                "https://proceedings.mlr.press",
+                "https://openreview.net",
+                "https://proceedings.neurips.cc",
+                ".pdf",
+            ]
+        ):
+            # Further validation (e.g. message.content.startswith("http")) is in on_paper_link
+            await on_paper_link(message)
+            return # Link processed
+
+    # Handle messages in paper discussion threads
     if (
         message.channel.type == discord.ChannelType.public_thread
         and message.channel.owner_id == client.user.id
         and str(message.channel.id) in paper_chat_logs.keys()
     ):
         await on_paper_thread(message)
+        return # Thread message processed
+
+    # Handle messages in the general GPT channel
     if str(message.channel.id) == CHANNEL_ID:
         await on_gpt_channel_response(message)
+        # No return needed if this is the last check
 
 
 async def on_paper_link(message):
     # メッセージがリンクのみであることを確認
     msg = await message.reply("生成中...", mention_author=False)
-    if not message.content.startswith("http"):
-        await message.channel.send("メッセージにリンクが含まれていません")
+    if not message.content.startswith("http"): # Ensure it's a link
+        await msg.edit(content="メッセージに有効なリンクが含まれていません。処理を中断します。")
         return
 
     raw_link = message.content
@@ -732,33 +912,72 @@ async def on_paper_link(message):
             pdf_link = raw_link.replace("/hash/", "/file/")
             pdf_link = pdf_link.replace("Abstract-Conference.html", "Paper-Conference.pdf")
 
+    file_path = ""  # Initialize file_path
     # PDFリンクの有効性をチェック
     if pdf_link and await is_valid_link(pdf_link):
         logger.info(f"有効なPDFリンクを取得: {pdf_link}")
         pdf_response = requests.get(pdf_link)
-        file_name = pdf_link.split("/")[-1]
+        
+        # Extract filename more robustly
+        parsed_url = urlparse(pdf_link)
+        file_name = os.path.basename(parsed_url.path)
+        if not file_name or not file_name.lower().endswith((".pdf", ".html")): # Check if filename is reasonable
+             # Try to get from content-disposition or generate one
+            cd = pdf_response.headers.get('content-disposition')
+            if cd:
+                fname = re.findall('filename="?([^"]+)"?', cd)
+                if fname:
+                    file_name = fname[0]
+            if not file_name or not file_name.lower().endswith(".pdf"): # If still no good name
+                # Fallback for names not ending with .pdf from URL path
+                potential_name_from_url = pdf_link.split("/")[-1]
+                if potential_name_from_url.lower().endswith(".pdf"):
+                    file_name = potential_name_from_url
+                else: # Final fallback
+                    file_name = "downloaded_paper.pdf"
+
+
+        if not file_name.lower().endswith(".pdf"): # Ensure .pdf extension if it's missing
+             file_name_base, file_ext = os.path.splitext(file_name)
+             if file_ext.lower() == ".html" and ".pdf" not in file_name_base.lower(): # if it was an html link leading to pdf
+                 file_name = file_name_base + ".pdf"
+             elif not file_ext: # no extension
+                 file_name = file_name + ".pdf"
+
+
         file_path = os.path.join(paper_folder_abspath, file_name)
         with open(file_path, "wb") as pdf_file:
             pdf_file.write(pdf_response.content)
         logger.info("download and saved " + file_path)
     else:
         logger.warning(f"無効なPDFリンク: {pdf_link}")
-        await message.channel.send("PDFリンクの取得に失敗しました")
+        await msg.edit(content="PDFリンクの取得または検証に失敗しました。処理を中断します。")
+        return
+
     extracted_text = extract_text_from_pdf(file_path)
     clean_text = clean_extracted_text(extracted_text)
+    
+    await msg.delete() # Delete the "生成中..." message
+    await _process_paper_and_reply(message, clean_text, raw_link)
 
-    metadata = _extract_paper_metadata(clean_text)
-    title = metadata["title"]
-    await msg.delete()
-    thread = await message.channel.create_thread(
-        name=title if len(title) < 100 else title[:97] + "...", message=message, auto_archive_duration=60
-    )
-    await thread.send(f"**Title**: {title}")
-    await _send_metadata_to_thread(thread, metadata)
-    summary = await _summary_paper_content(thread, clean_text)
-    if NOTION_TOKEN is not None:
-        thread_url = thread.jump_url
-        post_to_notion_database(metadata, raw_link, thread_url, summary)
+
+async def on_paper_attachment(message: discord.Message, attachment: discord.Attachment):
+    """Handles PDF file attachments in the paper channel."""
+    msg = await message.reply("添付ファイルを処理中...", mention_author=False)
+    try:
+        file_path = os.path.join(paper_folder_abspath, attachment.filename)
+        await attachment.save(file_path)
+        logger.info(f"Saved attached PDF: {file_path}")
+
+        extracted_text = extract_text_from_pdf(file_path)
+        clean_text = clean_extracted_text(extracted_text)
+
+        await msg.delete()  # Delete the "処理中..." message
+        # For attachments, raw_link is not applicable, so we pass an empty string or omit it if using default
+        await _process_paper_and_reply(message, clean_text, raw_link="")
+    except Exception as e:
+        logger.exception(f"Error processing attached PDF: {e}")
+        await msg.edit(content=f"添付されたPDFの処理中にエラーが発生しました。\n{traceback.format_exception_only(e)}")
 
 
 def split_text(text, max_length=2000):
@@ -787,7 +1006,7 @@ def format_chunk(chunk):
     return parts
 
 
-def post_to_notion_database(metadata, link: str, thread_url: str, summary: str):
+def post_to_notion_database(metadata, link: str, thread_url: str, summary: str, keywords_list: list[str]):
     """
     Posts the given information to a Notion database.
 
@@ -813,24 +1032,40 @@ def post_to_notion_database(metadata, link: str, thread_url: str, summary: str):
         "Notion-Version": "2022-06-28",
     }
 
-    data = json.dumps(
-        {
-            "parent": {"database_id": f"{NOTION_DATABASE_ID}"},
-            "properties": {
-                "link": {
-                    "rich_text": [
-                        {"text": {"content": f"{link}", "link": {"url": f"{link}"}}},
-                        {"text": {"content": ", "}},
-                        {"text": {"content": f"{thread_url}", "link": {"url": f"{thread_url}"}}},
-                    ]
-                },
-                "名前": {"title": [{"text": {"content": f"{title}"}}]},
-                "Author": {"rich_text": [{"text": {"content": f"{authors}"}}]},
-            },
+    properties = {
+        "名前": {"title": [{"text": {"content": f"{title}"}}]},
+        "Author": {"rich_text": [{"text": {"content": f"{authors}"}}]},
+        "タグ": {
+            "multi_select": keywords_list  # Assuming keywords_list is already in the correct format [{"name": "keyword1"}, ...]
         }
-    )
+    }
 
+    # Dynamically build the rich_text array for the 'link' property
+    link_rich_text_elements = []
+    if link:  # Only add if link (raw_link) is not empty
+        link_rich_text_elements.append({"text": {"content": link, "link": {"url": link}}})
+
+    if thread_url:
+        if link_rich_text_elements:  # If link element already exists, add a separator
+            link_rich_text_elements.append({"text": {"content": ", "}})
+        link_rich_text_elements.append({"text": {"content": thread_url, "link": {"url": thread_url}}})
+
+    # Only add the 'link' property if there are elements to include
+    if link_rich_text_elements:
+        properties["link"] = {"rich_text": link_rich_text_elements}
+    
+    # Prepare the complete data payload for Notion API
+    data_payload = {
+        "parent": {"database_id": f"{NOTION_DATABASE_ID}"},
+        "properties": properties
+    }
+    
+    data = json.dumps(data_payload)
+
+    logger.info(f"Notion API Request Data: {data}") # Log the request data for debugging
     response = requests.post(notion_page_url, headers=headers, data=data)
+    logger.info(f"Notion API Response Status: {response.status_code}") # Log status
+    logger.info(f"Notion API Response Text: {response.text}") # Log full response text for debugging
 
     if response.status_code == 200:
         notion_page_id = response.json().get("id")
@@ -880,7 +1115,7 @@ def post_to_notion_database(metadata, link: str, thread_url: str, summary: str):
                     {
                         "object": "block",
                         "type": "paragraph",
-                        "paragraph": {"rich_text": [{"text": {"content": "(summarized by gemini-1.5-flash)"}}]},
+                        "paragraph": {"rich_text": [{"text": {"content": "(summarized by gemini-2.0-flash)"}}]},
                     },
                 ]
             }
@@ -952,9 +1187,10 @@ async def on_gpt_channel_response(message):
     chat_log.append({"role": "user", "content": content})
     logger.info(f"user: {content}")
     retries = 3
+    retries = 3
     while retries > 0:
         try:
-            completion = get_completion(model_engine, chat_log, system=system, timeout=120, max_tokens=4096)
+            completion = get_completion(model_engine, chat_log, system=system, timeout=240)
             response = get_response_text(completion)
             response_list = split_string(response)
             chat_log.append(get_message_log(completion))
@@ -963,11 +1199,13 @@ async def on_gpt_channel_response(message):
             response_list.append(f"(USAGE: {price} USD, responsed by {model_engine})")
             logger.info(f"Usage: {price} USD, responsed by {model_engine}")
             total_token += get_total_tokens(completion)
-            if model_engine == "gpt-4o" and total_token > 128000 - 256:
+            if "gpt-4o" in model_engine and total_token > 128000 - 256:
                 chat_log = chat_log[1:]
-            elif model_engine == "gpt-4o-mini" and total_token > 128000 - 256:
+            elif "4.1" in model_engine and total_token > 1047576 - 256:
                 chat_log = chat_log[1:]
-            elif model_engine == "claude-3-5-sonnet-20241022" and total_token > 200000 - 256:
+            elif "gemini" in model_engine and total_token > 1000000 - 256:
+                chat_log = chat_log[1:]
+            elif (("claude" in model_engine) or model_engine == "o3" or model_engine == "o4-mini") and total_token > 200000 - 256:
                 chat_log = chat_log[1:]
             logger.info(chat_log)
             # logger.debug(completion)
@@ -991,10 +1229,11 @@ async def on_gpt_channel_response(message):
             )
             break
         except Exception as e:
+            retries -= 1 
             logger.exception(e)
             await message.reply(f"エラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False)
-            break
-
+            if retries == 0:
+                break
 
 async def on_paper_thread(message):
     """Process the received message and generate a response.
@@ -1014,32 +1253,72 @@ async def on_paper_thread(message):
     paper_chat_logs[str(message.channel.id)].append({"role": "user", "content": content})
     retries = 3
     while retries > 0:
-        try:
-            completion = get_completion(
-                model_engine,
-                paper_chat_logs[str(message.channel.id)],
-                system=system_paper,
-                timeout=240,
-                max_tokens=4096,
-            )
-            response = get_response_text(completion)
-            response_list = split_string(response)
-            paper_chat_logs[str(message.channel.id)].append(get_message_log(completion))
-            with open(paper_chat_logs_json_abspath, "w") as f:
-                json.dump(paper_chat_logs, f, ensure_ascii=False)
-            logger.info("assistant: " + response)
-            price = calculate_price(completion, model_engine)
-            logger.info(f"Usage: {price} USD, responsed by {model_engine}")
-            response_list.append(f"(USAGE: {price} USD, responsed by {model_engine})")
-            await msg.delete()
-            for response in response_list:
-                await message.channel.send(response)
-            break
-        except openai.APITimeoutError as e:
-            logger.info(e)
-            retries -= 1
-            logger.exception(e)
-            await reply_openai_exception(retries, message, e)
+            try:
+                try:
+                    logger.info({"role": "user", "content": content})
+                    completion = get_completion(
+                        model_engine,
+                        remove_refusal_field(paper_chat_logs[str(message.channel.id)]),
+                        system=system_paper,
+                        timeout=240
+                    )
+                except openai.APITimeoutError as e:
+                    logger.info("Timeout error during get_completion")
+                    retries -= 1
+                    logger.exception(e)
+                    await reply_openai_exception(retries, message, e)
+                    continue
+                except Exception as e:
+                    logger.exception("Error during get_completion")
+                    await message.reply(f"get_completionでエラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False)
+                    break
+
+                response = get_response_text(completion)
+                response_list = split_string(response)
+                paper_chat_logs[str(message.channel.id)].append(get_message_log(completion))
+                with open(paper_chat_logs_json_abspath, "w") as f:
+                    json.dump(paper_chat_logs, f, ensure_ascii=False)
+                logger.info("assistant: " + response)
+                price = calculate_price(completion, model_engine)
+                logger.info(f"Usage: {price} USD, responsed by {model_engine}")
+                response_list.append(f"(USAGE: {price} USD, responsed by {model_engine})")
+                await msg.delete()
+                for response in response_list:
+                    await message.channel.send(response)
+                break
+            except Exception as e:
+                logger.exception(e)
+                await message.reply(f"エラーが発生しました。\n{traceback.format_exception_only(e)}", mention_author=False)
+                break
+
+
+async def _process_paper_and_reply(message: discord.Message, clean_text: str, raw_link: str = ""):
+    """
+    Processes the cleaned text of a paper, creates a thread, sends metadata, summary, etc.
+
+    Args:
+        message (discord.Message): The message object representing the received message.
+        clean_text (str): The cleaned text of the paper.
+        raw_link (str): The raw link to the paper.
+
+    Returns:
+        None
+    """
+    metadata = _extract_paper_metadata(clean_text)
+    title = metadata["title"]
+
+    message = await message.reply(f"**Title**: {title}")
+    thread = await message.channel.create_thread(
+        name=title if len(title) < 100 else title[:97] + "...", message=message, auto_archive_duration=60
+    )
+
+    await _send_metadata_to_thread(thread, metadata)
+    keywords_list = await _extract_keywords_from_paper(thread, clean_text)
+    summary = await _summary_paper_content(thread, clean_text)
+    await _extract_challenging_words_for_english_learners(thread, clean_text)
+    if NOTION_TOKEN is not None:
+        thread_url = thread.jump_url
+        post_to_notion_database(metadata, raw_link, thread_url, summary, keywords_list)
 
 
 logger.info("Start client.")
